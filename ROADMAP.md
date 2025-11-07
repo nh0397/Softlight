@@ -49,8 +49,8 @@ What we need to do:
 - Improve state detection (wait for modals to fully load, forms to appear, etc.)
 - Better element finding strategies (handle edge cases)
 - Add basic error handling
-- Test Task 1: Create project in Linear
-- Test Task 2: Filter issues in Linear (or use a different app)
+- Test Task 1: Create task in Asana
+- Test Task 2: Filter database in Notion
 - Test Task 3: Create database in Notion
 - Fix any issues that come up
 
