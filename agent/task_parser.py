@@ -6,6 +6,7 @@ import os
 import json
 import google.generativeai as genai
 from dotenv import load_dotenv
+from config.prompts import TaskParsingPrompts
 
 # Load environment variables
 load_dotenv()
@@ -41,28 +42,7 @@ class TaskParser:
             'context': {}
         }
         """
-        prompt = f"""
-        Parse this task description into structured JSON format:
-        "{task_description}"
-        
-        Extract the following information:
-        1. The web application name (e.g., "Asana", "Notion")
-        2. The base URL if known (e.g., "https://asana.com" for Asana, "https://www.notion.so" for Notion)
-        3. The action to perform (e.g., "create_project", "filter_issues", "create_database")
-        4. A sanitized task name (lowercase, underscores, no special chars)
-        5. Any additional context (empty dict if none)
-        
-        Return ONLY valid JSON in this exact format:
-        {{
-            "app": "app name",
-            "app_url": "base URL or empty string",
-            "action": "action description",
-            "task_name": "sanitized_task_name",
-            "context": {{}}
-        }}
-        
-        Do not include any explanation, only the JSON.
-        """
+        prompt = TaskParsingPrompts.parse_task(task_description)
         
         try:
             response = self.model.generate_content(prompt)
