@@ -9,6 +9,8 @@ env/
 .venv
 *.log
 captures/
+sessions/
+browser_profiles/
 *.png
 *.html
 *.json
