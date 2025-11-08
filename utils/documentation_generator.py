@@ -28,31 +28,45 @@ class DocumentationGenerator:
         if not output_path:
             output_path = self.task_dir / "WORKFLOW.md"
         
-        task_title = workflow_data.get("task_name", self.task_name).replace("_", " ").title()
-        app_name = workflow_data.get("app", "Application")
+        # Handle both nested and flat structures
+        task_info = workflow_data.get("task", {})
+        workflow_info = workflow_data.get("workflow", {})
+        
+        task_title = task_info.get("task_name", self.task_name).replace("_", " ").title()
+        app_name = task_info.get("app", "Application")
+        
+        # Get status and description
+        status = workflow_data.get("status", "Completed")
+        task_description = task_info.get("description", task_title.lower())
+        started_at = workflow_info.get("started_at", "")
+        completed_at = workflow_info.get("completed_at", "")
         
         md_content = f"""# {task_title}
 
 **Application:** {app_name}  
 **Date:** {datetime.now().strftime("%B %d, %Y")}  
-**Status:** {workflow_data.get("status", "Completed")}
+**Status:** {status}
 
 ## Overview
 
-This workflow demonstrates how to {task_title.lower()} in {app_name}.
-
-## Steps
+**Task Description:** {task_description}
 
 """
+        if started_at:
+            md_content += f"**Started:** {started_at}\n"
+        if completed_at:
+            md_content += f"**Completed:** {completed_at}\n"
         
-        # Add each step
-        steps = workflow_data.get("steps", [])
+        md_content += "\n## Steps\n\n"
+        
+        # Add each step - get from workflow.steps
+        steps = workflow_info.get("steps", [])
         for i, step in enumerate(steps, 1):
-            step_number = step.get("step_number", i)
+            step_number = step.get("step", i)  # Changed from "step_number"
             action = step.get("action_type", "unknown")
             description = step.get("action_description", "No description")
             state_desc = step.get("state_description", "")
-            screenshot = step.get("screenshot_filename", "")
+            screenshot = step.get("screenshot", "")  # Changed from "screenshot_filename"
             url = step.get("url", "")
             notes = step.get("notes", "")
             
@@ -109,8 +123,14 @@ Total steps completed: {len(steps)}
         if not output_path:
             output_path = self.task_dir / "workflow.html"
         
-        task_title = workflow_data.get("task_name", self.task_name).replace("_", " ").title()
-        app_name = workflow_data.get("app", "Application")
+        # Handle both nested and flat structures
+        task_info = workflow_data.get("task", {})
+        workflow_info = workflow_data.get("workflow", {})
+        
+        task_title = task_info.get("task_name", self.task_name).replace("_", " ").title()
+        app_name = task_info.get("app", "Application")
+        status = workflow_data.get("status", "Completed")
+        task_description = task_info.get("description", task_title.lower())
         
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -202,19 +222,20 @@ Total steps completed: {len(steps)}
         <div class="meta">
             <strong>Application:</strong> {app_name} | 
             <strong>Date:</strong> {datetime.now().strftime("%B %d, %Y")} | 
-            <strong>Status:</strong> {workflow_data.get("status", "Completed")}
+            <strong>Status:</strong> {status}
         </div>
+        <p style="margin-top: 15px; color: #555;">{task_description}</p>
     </div>
 """
         
-        # Add each step
-        steps = workflow_data.get("steps", [])
+        # Add each step - get from workflow.steps
+        steps = workflow_info.get("steps", [])
         for i, step in enumerate(steps, 1):
-            step_number = step.get("step_number", i)
+            step_number = step.get("step", i)  # Changed from "step_number"
             action = step.get("action_type", "unknown")
             description = step.get("action_description", "No description")
             state_desc = step.get("state_description", "")
-            screenshot = step.get("screenshot_filename", "")
+            screenshot = step.get("screenshot", "")  # Changed from "screenshot_filename"
             url = step.get("url", "")
             notes = step.get("notes", "")
             
