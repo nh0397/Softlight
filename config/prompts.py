@@ -189,7 +189,7 @@ class ScreenshotAnalysisPrompts:
         Task Goal: "{task_goal}"
         {f"Current State: {current_state}" if current_state else ""}
         
-        {f"DOM ANALYSIS - Interactive elements extracted from page code:\n{dom_data}\n" if dom_data else ""}
+        {f"DOM & CONTEXT ANALYSIS:\n{dom_data}\n" if dom_data else ""}
         
         ANALYZE EVERYTHING visible in the screenshot carefully:
         
@@ -324,5 +324,38 @@ class TaskParsingPrompts:
         }}
         
         Do not include any explanation, only the JSON.
+        """
+
+class DocSummarizationPrompts:
+    """Prompts for summarizing web docs into concrete steps"""
+    
+    @staticmethod
+    def summarize_to_steps(app: str, action: str, points: list):
+        joined = "\n".join(f"- {p}" for p in points[:20])
+        return f"""
+        You are helping plan how to perform an action in a web app.
+        
+        App: "{app}"
+        Action: "{action}"
+        
+        Below are raw bullet points extracted from official documentation:
+        {joined}
+        
+        Convert these into a concise, practical plan with 5-10 steps MAX that a browser automation can follow.
+        Each step must be an imperative instruction aimed at UI elements (buttons, inputs, menus) using visible labels.
+        
+        Return ONLY valid JSON:
+        {{
+          "app": "{app}",
+          "action": "{action}",
+          "steps": [
+            {{
+              "step": 1,
+              "instruction": "Click 'New database'",
+              "notes": "If hidden, open sidebar"
+            }}
+          ],
+          "notes": "short caveats if any"
+        }}
         """
 

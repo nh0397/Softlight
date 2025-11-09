@@ -209,7 +209,7 @@ class StateDetector:
                 "reasoning": result
             }
     
-    def analyze_viewport_for_next_steps(self, screenshot_path: Path, task_goal: str, current_state: str = "", dom_data: str = "") -> Dict:
+    def analyze_viewport_for_next_steps(self, screenshot_path: Path, task_goal: str, current_state: str = "", dom_data: str = "", docs_context: str = "") -> Dict:
         """
         Analyze viewport screenshot to determine next steps.
         
@@ -222,7 +222,11 @@ class StateDetector:
         Returns:
             Dict with analysis and suggested actions
         """
-        prompt = ScreenshotAnalysisPrompts.analyze_viewport_for_next_steps(task_goal, current_state, dom_data)
+        if docs_context:
+            combined_dom = (dom_data or "") + ("\n\nDOCS CONTEXT:\n" + docs_context)
+        else:
+            combined_dom = dom_data
+        prompt = ScreenshotAnalysisPrompts.analyze_viewport_for_next_steps(task_goal, current_state, combined_dom)
         result = self.analyze_screenshot(screenshot_path, prompt)
         
         # Try to parse JSON response
