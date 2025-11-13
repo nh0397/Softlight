@@ -91,6 +91,8 @@ Return ONLY valid JSON:
 """
         try:
             login_response = state_detector.analyze_screenshot(verify, login_check_prompt)
+            # Wait 7 seconds after LLM call
+            time.sleep(7)
             cleaned = state_detector._clean_json_like(login_response)
             login_data = json.loads(cleaned)
             is_logged_in = login_data.get("is_logged_in", False)
@@ -345,7 +347,7 @@ def main():
 
     parser = TaskParser()
     parsed = parser.parse(task_description)
-    app_name = parsed["app"]
+    app_name = "Softlight Assignment"
     app_url = parsed["app_url"]
     action_goal = parsed["action"]
     task_name_slug = parsed["task_name"]
@@ -478,16 +480,24 @@ def main():
             print(f"      Login buttons: {login_form_check.get('loginButtonsCount', 0)}")
             print(f"      User indicators: {login_form_check.get('userIndicatorsCount', 0)}")
             
-            # Clear logic: login button + no user indicators = need to log in
-            if login_form_check.get("hasLoginButton") and not login_form_check.get("hasUserIndicators"):
-                print(f"   ⚠️ DOM shows login button with no user indicators - NOT LOGGED IN")
-                login_required_indicators.append("Login button present, no user indicators")
-            elif login_form_check.get("hasUserIndicators"):
+            # FIXED LOGIC: Login buttons are a STRONG signal of NOT being logged in
+            # If login buttons exist, user is NOT logged in (regardless of user indicators)
+            has_login_button = login_form_check.get("hasLoginButton", False)
+            has_user_indicators = login_form_check.get("hasUserIndicators", False)
+            has_login_form = login_form_check.get("hasLoginForm", False)
+            
+            if has_login_button:
+                # Login buttons = NOT LOGGED IN (this is the strongest signal)
+                print(f"   ⚠️ DOM shows login button(s) - NOT LOGGED IN")
+                login_required_indicators.append(f"Login button(s) present ({login_form_check.get('loginButtonsCount', 0)} found)")
+            elif has_login_form:
+                # Login form = NOT LOGGED IN
+                print(f"   ⚠️ DOM shows login form present - NOT LOGGED IN")
+                login_required_indicators.append("Login form in DOM")
+            elif has_user_indicators:
+                # User indicators without login buttons = LOGGED IN
                 print(f"   ✅ DOM shows user indicators (logged in)")
                 logged_in_indicators.append("User indicators in DOM")
-            elif login_form_check.get("hasLoginForm"):
-                print(f"   ⚠️ DOM shows login form present")
-                login_required_indicators.append("Login form in DOM")
             else:
                 print(f"   📋 DOM check inconclusive")
         except Exception as e:
@@ -544,6 +554,8 @@ Answer ONLY with JSON:
 }
 """
                 login_response = detector.analyze_screenshot(login_screenshot, login_prompt)
+                # Wait 7 seconds after LLM call
+                time.sleep(7)
                 cleaned = detector._clean_json_like(login_response)
                 screenshot_data = json.loads(cleaned)
                 is_login_page = screenshot_data.get("is_login_page", False)
@@ -669,6 +681,8 @@ Answer ONLY with JSON:
                     """
             try:
                 raw = detector.analyze_screenshot(screenshot_path, prompt)
+                # Wait 7 seconds after LLM call
+                time.sleep(7)
                 cleaned = detector._clean_json_like(raw)
                 data = json.loads(cleaned)
                 return data
@@ -808,6 +822,8 @@ Answer ONLY with JSON:
             
             # Check goal completion FIRST to inform whether to reuse instruction
             goal_check = detector.check_goal_completion(shot, task_goal=action_goal, current_state="")
+            # Wait 7 seconds after LLM call
+            time.sleep(7)
             goal_completed = goal_check.get("goal_completed", False)
             goal_reasoning = goal_check.get("reasoning", "")
             next_steps = goal_check.get("next_steps_needed", [])
@@ -954,6 +970,8 @@ Return ONLY this JSON (no other text):
             
             if not reuse_previous_instruction:
                 llm_response = detector.analyze_screenshot(shot, prompt)
+                # Wait 7 seconds after LLM call
+                time.sleep(7)
                 
                 # Parse response - extract JSON even if LLM added reasoning
                 try:
@@ -1138,33 +1156,75 @@ Return ONLY this JSON (no other text):
                     const getLabelsForElement = (el) => {
                         const labels = [];
                         
+                        if (!el) return labels;
+                        
                         // Standard input labels
-                        if (el.labels && el.labels.length > 0) {
-                            labels.push(...Array.from(el.labels).map(l => l.textContent.trim()));
+                        try {
+                            if (el.labels && el.labels.length > 0) {
+                                Array.from(el.labels).forEach(l => {
+                                    if (l && l.textContent) {
+                                        const labelText = l.textContent.trim();
+                                        if (labelText) {
+                                            labels.push(labelText);
+                                        }
+                                    }
+                                });
+                            }
+                        } catch (e) {
+                            // Ignore errors
                         }
                         
                         // Closest label
-                        const closestLabel = el.closest('label');
-                        if (closestLabel) {
-                            labels.push(closestLabel.textContent.trim());
+                        try {
+                            const closestLabel = el.closest('label');
+                            if (closestLabel && closestLabel.textContent) {
+                                const labelText = closestLabel.textContent.trim();
+                                if (labelText) {
+                                    labels.push(labelText);
+                                }
+                            }
+                        } catch (e) {
+                            // Ignore errors
                         }
                         
                         // Label[for] attribute
-                        if (el.id) {
-                            const forLabel = document.querySelector(`label[for="${el.id}"]`);
-                            if (forLabel) {
-                                labels.push(forLabel.textContent.trim());
+                        try {
+                            if (el.id) {
+                                const forLabel = document.querySelector(`label[for="${el.id}"]`);
+                                if (forLabel && forLabel.textContent) {
+                                    const labelText = forLabel.textContent.trim();
+                                    if (labelText) {
+                                        labels.push(labelText);
+                                    }
+                                }
                             }
+                        } catch (e) {
+                            // Ignore errors
                         }
                         
                         // Placeholder
-                        if (el.placeholder) {
-                            labels.push(el.placeholder.trim());
+                        try {
+                            if (el.placeholder) {
+                                const placeholderText = el.placeholder.trim();
+                                if (placeholderText) {
+                                    labels.push(placeholderText);
+                                }
+                            }
+                        } catch (e) {
+                            // Ignore errors
                         }
                         
                         // Aria-label
-                        if (el.getAttribute('aria-label')) {
-                            labels.push(el.getAttribute('aria-label').trim());
+                        try {
+                            const ariaLabel = el.getAttribute('aria-label');
+                            if (ariaLabel) {
+                                const ariaText = ariaLabel.trim();
+                                if (ariaText) {
+                                    labels.push(ariaText);
+                                }
+                            }
+                        } catch (e) {
+                            // Ignore errors
                         }
                         
                         // For contenteditable: check parent labels, nearby text
@@ -1173,23 +1233,51 @@ Return ONLY this JSON (no other text):
                             const parent = el.parentElement;
                             if (parent) {
                                 // Look for label element nearby
-                                const nearbyLabel = parent.querySelector('label') || 
-                                                   parent.previousElementSibling?.querySelector('label') ||
-                                                   parent.closest('[class*="label"], [class*="Label"]');
-                                if (nearbyLabel) {
-                                    labels.push(nearbyLabel.textContent.trim());
+                                try {
+                                    const nearbyLabel = parent.querySelector('label') || 
+                                                       parent.previousElementSibling?.querySelector('label') ||
+                                                       parent.closest('[class*="label"], [class*="Label"]');
+                                    if (nearbyLabel && nearbyLabel.textContent) {
+                                        const labelText = nearbyLabel.textContent.trim();
+                                        if (labelText) {
+                                            labels.push(labelText);
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Ignore errors in label finding
                                 }
                                 
-                                // Check for text before the element
-                                const prevText = parent.textContent.split(el.textContent)[0].trim();
-                                if (prevText && prevText.length < 50) {
-                                    labels.push(prevText);
+                                // Check for text before the element (with proper null checks)
+                                try {
+                                    const parentText = parent.textContent || '';
+                                    const elText = el.textContent || '';
+                                    if (parentText && elText && parentText.includes(elText)) {
+                                        const splitResult = parentText.split(elText);
+                                        if (splitResult && splitResult.length > 0 && splitResult[0]) {
+                                            const prevText = splitResult[0].trim();
+                                            if (prevText && prevText.length < 50) {
+                                                labels.push(prevText);
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Ignore errors in text extraction
                                 }
                             }
                             
                             // Check aria-label on parent
-                            if (parent && parent.getAttribute('aria-label')) {
-                                labels.push(parent.getAttribute('aria-label').trim());
+                            if (parent) {
+                                try {
+                                    const parentAriaLabel = parent.getAttribute('aria-label');
+                                    if (parentAriaLabel) {
+                                        const ariaText = parentAriaLabel.trim();
+                                        if (ariaText) {
+                                            labels.push(ariaText);
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Ignore errors
+                                }
                             }
                         }
                         
@@ -1227,10 +1315,11 @@ Return ONLY this JSON (no other text):
                     let allLabelsDebug = [];
                     
                     allElements.forEach((el, idx) => {
-                        if (!isFillable(el)) return;
-                        if (el.offsetParent === null && !el.hasAttribute('contenteditable')) return; // Skip hidden (except contenteditable)
-                        
-                        const labelsArray = getLabelsForElement(el);
+                        try {
+                            if (!el || !isFillable(el)) return;
+                            if (el.offsetParent === null && !el.hasAttribute('contenteditable')) return; // Skip hidden (except contenteditable)
+                            
+                            const labelsArray = getLabelsForElement(el);
                         
                         // Debug: collect all labels
                         if (labelsArray.length > 0) {
@@ -1247,98 +1336,175 @@ Return ONLY this JSON (no other text):
                             });
                         }
                         
-                        // Check if any label matches
-                        const matches = labelsArray.some(label => {
-                            const labelNormalized = normalize(label);
-                            const exactMatch = labelNormalized === targetNormalized;
-                            const includesMatch = labelNormalized.includes(targetNormalized) || targetNormalized.includes(labelNormalized);
-                            if (exactMatch || includesMatch) {
-                                console.log(`[FILL] Match found: "${label}" (normalized: "${labelNormalized}") matches "${targetNormalized}"`);
+                            // Check if any label matches
+                            const matches = labelsArray.some(label => {
+                                try {
+                                    if (!label) return false;
+                                    const labelNormalized = normalize(label);
+                                    const exactMatch = labelNormalized === targetNormalized;
+                                    const includesMatch = labelNormalized.includes(targetNormalized) || targetNormalized.includes(labelNormalized);
+                                    if (exactMatch || includesMatch) {
+                                        console.log(`[FILL] Match found: "${label}" (normalized: "${labelNormalized}") matches "${targetNormalized}"`);
+                                    }
+                                    return exactMatch || includesMatch;
+                                } catch (e) {
+                                    return false;
+                                }
+                            });
+                            
+                            if (matches) {
+                                targetElement = el;
+                                matchedLabelsArray = labelsArray;
                             }
-                            return exactMatch || includesMatch;
-                        });
-                        
-                        if (matches) {
-                            targetElement = el;
-                            matchedLabelsArray = labelsArray;
+                        } catch (e) {
+                            // Skip this element if there's an error
+                            console.warn(`[FILL] Error processing element ${idx}:`, e);
                         }
                     });
                     
                     if (targetElement) {
-                        targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        targetElement.focus();
-                        
-                        // Helper to trigger comprehensive events
-                        const triggerAllEvents = (el, value) => {
-                            // Clear first
-                            if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
-                                el.textContent = '';
-                            } else if ('value' in el) {
-                                el.value = '';
-                            } else {
-                                el.textContent = '';
-                            }
-                            
-                            // Set value
-                            if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
-                                el.textContent = value;
-                            } else if ('value' in el) {
-                                el.value = value;
-                            } else {
-                                el.textContent = value;
-                            }
-                            
-                            // Trigger comprehensive events
-                            const events = [
-                                new Event('input', { bubbles: true, cancelable: true }),
-                                new Event('change', { bubbles: true, cancelable: true }),
-                                new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' }),
-                                new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' }),
-                                new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' })
-                            ];
-                            
-                            events.forEach(evt => {
-                                try {
-                                    el.dispatchEvent(evt);
-                                } catch (e) {
-                                    console.warn(`[FILL] Failed to dispatch ${evt.type}:`, e);
-                                }
-                            });
-                            
-                            // Also trigger focus/blur to simulate real interaction
-                            el.dispatchEvent(new Event('focus', { bubbles: true }));
-                            el.dispatchEvent(new Event('blur', { bubbles: true }));
-                            el.focus(); // Re-focus after blur
-                        };
-                        
-                        // Handle different element types
-                        if (targetElement.contentEditable === 'true' || targetElement.getAttribute('contenteditable') === 'true') {
-                            // Contenteditable: use comprehensive event triggering
-                            triggerAllEvents(targetElement, valueToEnter);
-                            console.log(`[FILL] Set contenteditable value: "${valueToEnter}"`);
-                        } else if (targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') {
-                            // Standard input: set value and trigger all events
-                            triggerAllEvents(targetElement, valueToEnter);
-                            console.log(`[FILL] Set input value: "${valueToEnter}"`);
-                        } else {
-                            // Div/span acting as input: use comprehensive events
-                            triggerAllEvents(targetElement, valueToEnter);
-                            console.log(`[FILL] Set custom input value: "${valueToEnter}"`);
+                        try {
+                            targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            targetElement.focus();
+                        } catch (e) {
+                            console.warn(`[FILL] Error scrolling/focusing:`, e);
                         }
                         
-                        const matchedLabel = matchedLabelsArray.find(l => {
-                            const lNorm = normalize(l);
-                            return lNorm === targetNormalized || lNorm.includes(targetNormalized) || targetNormalized.includes(lNorm);
-                        }) || matchedLabelsArray[0];
+                        // Fill using native input value setter (bypasses React/Vue synthetic events)
+                        // Set value IMMEDIATELY (synchronously), then simulate typing asynchronously
+                        let fillMethod = 'unknown';
                         
-                        return {
-                            success: true,
-                            tag: targetElement.tagName,
-                            value: valueToEnter,
-                            inputType: targetElement.type || (targetElement.contentEditable ? 'contenteditable' : 'custom'),
-                            matchedLabel: matchedLabel,
-                            method: targetElement.contentEditable ? 'contenteditable' : (targetElement.tagName === 'INPUT' ? 'input' : 'custom')
-                        };
+                        try {
+                            if (targetElement.contentEditable === 'true' || targetElement.getAttribute('contenteditable') === 'true') {
+                            // Contenteditable: set value immediately
+                            targetElement.textContent = valueToEnter;
+                            targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                            
+                            // Simulate typing: add space, then remove it (async, but value is already set)
+                            setTimeout(() => {
+                                targetElement.textContent = valueToEnter + ' ';
+                                targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                
+                                setTimeout(() => {
+                                    targetElement.textContent = valueToEnter;
+                                    targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                    
+                                    setTimeout(() => {
+                                        targetElement.blur();
+                                        targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }, 200);
+                                }, 200);
+                            }, 200);
+                            fillMethod = 'contenteditable';
+                        } else if (targetElement.tagName === 'INPUT') {
+                            // Standard input: use native value setter - SET IMMEDIATELY
+                            try {
+                                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                                    window.HTMLInputElement.prototype, 'value'
+                                ).set;
+                                
+                                // Set value IMMEDIATELY (synchronously)
+                                nativeInputValueSetter.call(targetElement, valueToEnter);
+                                targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                
+                                // Simulate typing asynchronously
+                                setTimeout(() => {
+                                    nativeInputValueSetter.call(targetElement, valueToEnter + ' ');
+                                    targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                    
+                                    setTimeout(() => {
+                                        nativeInputValueSetter.call(targetElement, valueToEnter);
+                                        targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                        
+                                        setTimeout(() => {
+                                            targetElement.blur();
+                                            targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                        }, 200);
+                                    }, 200);
+                                }, 200);
+                                fillMethod = 'native_setter';
+                            } catch (e) {
+                                // Fallback if native setter fails
+                                targetElement.value = valueToEnter;
+                                targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                fillMethod = 'fallback';
+                            }
+                        } else if (targetElement.tagName === 'TEXTAREA') {
+                            // Textarea: set value immediately
+                            targetElement.value = valueToEnter;
+                            targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                            
+                            // Simulate typing asynchronously
+                            setTimeout(() => {
+                                targetElement.value = valueToEnter + ' ';
+                                targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                
+                                setTimeout(() => {
+                                    targetElement.value = valueToEnter;
+                                    targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                    
+                                    setTimeout(() => {
+                                        targetElement.blur();
+                                        targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }, 200);
+                                }, 200);
+                            }, 200);
+                            fillMethod = 'textarea';
+                        } else {
+                            // Div/span acting as input
+                            if ('value' in targetElement) {
+                                try {
+                                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                                        Object.getPrototypeOf(targetElement), 'value'
+                                    ).set;
+                                    nativeSetter.call(targetElement, valueToEnter);
+                                    targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                    targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                    fillMethod = 'custom_native';
+                                } catch (e) {
+                                    targetElement.value = valueToEnter;
+                                    targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                    targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                    fillMethod = 'custom_fallback';
+                                }
+                            } else {
+                                targetElement.textContent = valueToEnter;
+                                targetElement.dispatchEvent(new Event('input', { bubbles: true }));
+                                targetElement.dispatchEvent(new Event('change', { bubbles: true }));
+                                fillMethod = 'custom_text';
+                            }
+                        }
+                        
+                            console.log(`[FILL] Set value: "${valueToEnter}" using method: ${fillMethod}`);
+                            
+                            const matchedLabel = (matchedLabelsArray && matchedLabelsArray.length > 0) ? 
+                                (matchedLabelsArray.find(l => {
+                                    try {
+                                        if (!l) return false;
+                                        const lNorm = normalize(l);
+                                        return lNorm === targetNormalized || lNorm.includes(targetNormalized) || targetNormalized.includes(lNorm);
+                                    } catch (e) {
+                                        return false;
+                                    }
+                                }) || matchedLabelsArray[0]) : 'unknown';
+                            
+                            return {
+                                success: true,
+                                tag: targetElement.tagName || 'unknown',
+                                value: valueToEnter,
+                                inputType: targetElement.type || (targetElement.contentEditable ? 'contenteditable' : 'custom'),
+                                matchedLabel: matchedLabel,
+                                method: fillMethod
+                            };
+                        } catch (e) {
+                            console.error(`[FILL] Error filling element:`, e);
+                            return {
+                                success: false,
+                                reason: `Error during fill: ${e.message || String(e)}`,
+                                tag: targetElement ? targetElement.tagName : 'unknown'
+                            };
+                        }
                     } else {
                         console.error(`[FILL] No fillable element found with label text "${labelText}"`);
                         const availableLabels = [];
@@ -1362,7 +1528,11 @@ Return ONLY this JSON (no other text):
                 """
                 
                 try:
+                    # Evaluate the script - the setTimeout chains run asynchronously
                     result = page.evaluate(fill_script, [text, value])
+                    
+                    # Wait for all setTimeout chains to complete (200ms * 3 = 600ms + buffer)
+                    time.sleep(0.8)
                     
                     if result.get("success"):
                         matched_label = result.get("matchedLabel", text)
@@ -1467,14 +1637,26 @@ Return ONLY this JSON (no other text):
         else:
             print("Reached maximum step limit, stopping.")
 
+        # Take final screenshot before closing browser
+        print("\n📸 Taking final screenshot...")
+        final_screenshot = task_dir / f"screenshot_final.png"
+        try:
+            page.screenshot(path=str(final_screenshot), full_page=True)
+            print(f"✅ Final screenshot saved: {final_screenshot.name}")
+        except Exception as e:
+            print(f"⚠️ Failed to take final screenshot: {e}")
+
         # Generate HTML documentation
         print("\n" + "="*80)
         print("📄 Generating documentation...")
         print("="*80)
         
         try:
-            # Collect all screenshots
+            # Collect all screenshots (including final)
             screenshots = sorted(task_dir.glob("screenshot_step_*.png"))
+            final_screenshot_path = task_dir / "screenshot_final.png"
+            if final_screenshot_path.exists():
+                screenshots.append(final_screenshot_path)
             
             # Generate clean HTML
             html_content = f"""<!DOCTYPE html>
@@ -1694,7 +1876,26 @@ Return ONLY this JSON (no other text):
                 
                 html_content += """
             </div>
-"""
+        """
+            
+            # Add final screenshot if it exists
+            final_screenshot_path = task_dir / "screenshot_final.png"
+            if final_screenshot_path.exists():
+                html_content += f"""
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-number">{len(action_history) + 1}</div>
+                    <div class="step-title">
+                        Final State
+                        <span class="step-action action-click">COMPLETED</span>
+                    </div>
+                </div>
+                <div class="step-description">
+                    Final state after completing the task.
+                </div>
+                <img src="screenshot_final.png" alt="Final State" class="screenshot" />
+            </div>
+        """
             
             html_content += """
         </div>
