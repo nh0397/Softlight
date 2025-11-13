@@ -11,7 +11,8 @@ from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from config.prompts import ScreenshotAnalysisPrompts
 from utils.rate_limiter import RateLimiter
@@ -22,33 +23,101 @@ load_dotenv()
 class StateDetector:
     def __init__(self, page: Optional[Page] = None):
         self.page = page
-        self._model = None
+        self._client = None
         self._use_llm = True
         self.rate_limiter = RateLimiter(max_calls=15, time_window=60)
 
     @property
-    def model(self):
-        if self._model is None and self._use_llm:
+    def client(self):
+        if self._client is None and self._use_llm:
             api_key = os.getenv("GEMINI_API_KEY")
             if not api_key:
                 raise ValueError("GEMINI_API_KEY not found")
-            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-            genai.configure(api_key=api_key)
-            self._model = genai.GenerativeModel(model_name)
-        return self._model
+            self._client = genai.Client(api_key=api_key)
+        return self._client
+    
+    @property
+    def model_name(self):
+        return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     def _clean_json_like(self, text: str) -> str:
-        t = (text or "").strip()
+        """
+        Extract JSON from text, even if it's embedded in reasoning or explanations.
+        Uses multiple strategies to find and extract valid JSON.
+        """
+        if not text:
+            return ""
+        
+        t = text.strip()
+        
+        # Strategy 1: Find JSON object by matching braces properly (handles nesting)
+        import re
+        # Find all potential JSON objects by tracking brace depth
+        json_candidates = []
+        start_idx = -1
+        brace_depth = 0
+        
+        for i, char in enumerate(t):
+            if char == '{':
+                if brace_depth == 0:
+                    start_idx = i
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+                if brace_depth == 0 and start_idx >= 0:
+                    candidate = t[start_idx:i+1]
+                    json_candidates.append(candidate)
+                    start_idx = -1
+        
+        # Try each candidate, prefer longer/more complete ones
+        for candidate in sorted(json_candidates, key=len, reverse=True):
+            try:
+                # Validate it's valid JSON
+                parsed = json.loads(candidate)
+                # Make sure it has the expected structure
+                if isinstance(parsed, dict) and ("event" in parsed or "text" in parsed):
+                    return candidate.strip()
+            except:
+                continue
+        
+        # Fallback: remove markdown code blocks
         if t.startswith("```json"):
             t = t[7:]
         if t.startswith("```"):
             t = t[3:]
         if t.endswith("```"):
             t = t[:-3]
+        
+        # Try to extract JSON from lines that look like JSON
+        lines = t.split('\n')
+        json_lines = []
+        in_json = False
+        brace_count = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if '{' in stripped:
+                in_json = True
+                brace_count += stripped.count('{') - stripped.count('}')
+            if in_json:
+                json_lines.append(line)
+                if '}' in stripped:
+                    brace_count += stripped.count('}') - stripped.count('{')
+                    if brace_count <= 0:
+                        json_text = '\n'.join(json_lines)
+                        try:
+                            json.loads(json_text)
+                            return json_text.strip()
+                        except:
+                            pass
+                        json_lines = []
+                        in_json = False
+                        brace_count = 0
+        
         return t.strip()
 
     def analyze_screenshot(self, screenshot_path: Path, prompt: str) -> str:
-        if not self._use_llm or self.model is None:
+        if not self._use_llm or self.client is None:
             return "LLM analysis disabled"
         try:
             self.rate_limiter.wait_if_needed()
@@ -62,10 +131,21 @@ class StateDetector:
             print(f"{prompt}")
             print(f"{'='*80}\n")
             
-            # Gemini API
+            # Read image data
             with open(screenshot_path, "rb") as f:
                 image_data = f.read()
-            response = self.model.generate_content([prompt, {"mime_type": "image/png", "data": image_data}])
+            
+            # Use new SDK format
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Part.from_bytes(
+                        data=image_data,
+                        mime_type="image/png"
+                    ),
+                    prompt
+                ]
+            )
             text = response.text.strip()
             
             # DEBUG: Print the response received
@@ -256,3 +336,77 @@ class StateDetector:
 
     def analyze_screenshot_for_element_purpose(self, screenshot_path: Path):
         return {}
+    
+    def get_click_coordinates(self, screenshot_path: Path, target_text: str) -> Optional[Dict]:
+        """
+        Ask Gemini to identify the element with target_text in the screenshot
+        and return its bounding box coordinates.
+        
+        Returns:
+            {
+                "x": center_x,
+                "y": center_y,
+                "bounding_box": {"x": x, "y": y, "width": w, "height": h},
+                "confidence": "high|medium|low",
+                "element_text": "actual text found"
+            } or None
+        """
+        if not self._use_llm or self.client is None:
+            return None
+        
+        prompt = f"""Look at this screenshot and find the clickable element that contains or matches the text: "{target_text}"
+
+Return the bounding box coordinates of the element's center point in JSON format:
+{{
+  "x": <center_x_coordinate>,
+  "y": <center_y_coordinate>,
+  "bounding_box": {{
+    "x": <left_edge>,
+    "y": <top_edge>,
+    "width": <width>,
+    "height": <height>
+  }},
+  "confidence": "high|medium|low",
+  "element_text": "<actual visible text of the element>"
+}}
+
+IMPORTANT:
+- Coordinates should be in pixels relative to the screenshot
+- x, y should be the CENTER of the clickable element
+- If multiple elements match, choose the most relevant one for the task
+- The element_text should be the actual visible text (may include special characters)
+- For matching, ignore special characters and focus on letters/numbers - e.g., "Blank + Project" matches "Blank Project"
+- If no element found, return {{"error": "not found"}}
+- Return ONLY valid JSON, no markdown code blocks"""
+        
+        try:
+            self.rate_limiter.wait_if_needed()
+            
+            with open(screenshot_path, "rb") as f:
+                image_data = f.read()
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Part.from_bytes(
+                        data=image_data,
+                        mime_type="image/png"
+                    ),
+                    prompt
+                ]
+            )
+            
+            text = response.text.strip()
+            cleaned = self._clean_json_like(text)
+            result = json.loads(cleaned)
+            
+            if "error" in result:
+                return None
+            
+            if "x" in result and "y" in result:
+                return result
+            
+            return None
+        except Exception as e:
+            print(f"⚠️ Error getting coordinates from LLM: {e}")
+            return None
