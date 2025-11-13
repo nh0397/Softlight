@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from utils.rate_limiter import RateLimiter
-import google.generativeai as genai
+from google import genai
 
 
 OFFICIAL_DOMAINS = {
@@ -32,10 +32,8 @@ class WebDocs:
         self.max_pages = max_pages
         self.rate_limiter = RateLimiter(max_calls=15, time_window=60)
         api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        self.model = genai.GenerativeModel(self.model_name) if api_key else None
+        self.client = genai.Client(api_key=api_key) if api_key else None
 
     def _cache_path(self, app: str, action: str) -> Path:
         key = f"{app.strip().lower()}_{action.strip().lower()}".replace(" ", "_")
@@ -138,7 +136,7 @@ class WebDocs:
         """
         Use LLM to convert extracted points into a concise step plan.
         """
-        if not self.model:
+        if not self.client:
             # Fallback: return raw points
             return {
                 "app": app,
@@ -149,7 +147,10 @@ class WebDocs:
         from config.prompts import DocSummarizationPrompts
         prompt = DocSummarizationPrompts.summarize_to_steps(app, action, points)
         self.rate_limiter.wait_if_needed()
-        resp = self.model.generate_content(prompt)
+        resp = self.client.models.generate_content(
+            model=self.model_name,
+            contents=[prompt]
+        )
         text = resp.text.strip()
         # Clean code fences
         if text.startswith("```json"):

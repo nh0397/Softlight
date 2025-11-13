@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 from collections import defaultdict
 
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
 from agent.task_parser import TaskParser
 from agent.browser_controller import BrowserController
@@ -158,6 +158,182 @@ def ensure_navigate(controller: BrowserController, page, url: str, task_dir: Pat
     return False
 
 
+def click_text_anywhere(page: Page, text: str, timeout_ms: int = 6000, prefer_exact: bool = True) -> Dict:
+    """
+    Attempt to click visible text across all frames using trusted Playwright input.
+    Returns dict with success status and details about what was clicked.
+    """
+    target_text = (text or "").strip()
+    if not target_text:
+        return {"success": False, "reason": "empty text"}
+
+    def normalize_text_for_matching(text: str) -> str:
+        """Normalize text by removing special chars and normalizing whitespace."""
+        if not text:
+            return ""
+        # Remove special characters, keep only letters, numbers, spaces
+        normalized = re.sub(r'[^a-zA-Z0-9\s]', '', text)
+        # Normalize whitespace
+        normalized = re.sub(r'\s+', ' ', normalized)
+        return normalized.strip().lower()
+    
+    def try_locator(loc, description: str = "") -> Dict:
+        try:
+            count = loc.count()
+            if count > 0:
+                target_normalized = normalize_text_for_matching(target_text)
+                
+                # If multiple matches, prefer exact normalized text match
+                if count > 1 and prefer_exact:
+                    # Try to find exact normalized match first
+                    for i in range(count):
+                        try:
+                            el = loc.nth(i)
+                            el_text = el.inner_text(timeout=500).strip()
+                            el_normalized = normalize_text_for_matching(el_text)
+                            if el_normalized == target_normalized:
+                                el.scroll_into_view_if_needed(timeout=timeout_ms)
+                                el.click(timeout=timeout_ms)
+                                return {"success": True, "method": description, "matched_text": el_text, "index": i, "total": count}
+                        except Exception:
+                            continue
+                
+                # Fallback to first match
+                locator = loc.first
+                matched_text = ""
+                try:
+                    matched_text = locator.inner_text(timeout=500).strip()
+                except Exception:
+                    pass
+                locator.scroll_into_view_if_needed(timeout=timeout_ms)
+                locator.click(timeout=timeout_ms)
+                return {"success": True, "method": description, "matched_text": matched_text, "index": 0, "total": count}
+        except PlaywrightTimeoutError:
+            return {"success": False, "reason": "timeout"}
+        except Exception as e:
+            return {"success": False, "reason": str(e)[:50]}
+        return {"success": False, "reason": "no matches"}
+
+    # Normalize target text for matching (remove special chars, normalize spaces)
+    normalized_target = re.sub(r'[^a-zA-Z0-9\s]', '', target_text)
+    normalized_target = re.sub(r'\s+', ' ', normalized_target).strip()
+    
+    # Try exact match first, then partial
+    pattern_factories = [
+        (lambda f: f.get_by_text(normalized_target, exact=True), "exact_text"),
+        (lambda f: f.get_by_role("button", name=re.compile(re.escape(normalized_target), re.I)), "button_role"),
+        (lambda f: f.get_by_role("link", name=re.compile(re.escape(normalized_target), re.I)), "link_role"),
+        (lambda f: f.get_by_text(normalized_target, exact=False), "partial_text"),
+    ]
+
+    for frame in page.frames:
+        for factory, desc in pattern_factories:
+            try:
+                locator = factory(frame)
+                result = try_locator(locator, desc)
+                if result.get("success"):
+                    return result
+            except Exception:
+                continue
+
+    fallback_script = """
+    (t) => {
+        const withinViewport = (r) =>
+          r.width > 0 && r.height > 0 &&
+          r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0;
+
+        // Normalize text: remove special chars, normalize whitespace
+        const normalize = (str) => {
+            if (!str) return '';
+            return str.replace(/[^a-zA-Z0-9\\s]/g, '')  // Remove special chars
+                     .replace(/\\s+/g, ' ')              // Normalize whitespace
+                     .trim()
+                     .toLowerCase();
+        };
+
+        const targetNormalized = normalize(t);
+
+        const els = [...document.querySelectorAll('*')].filter(el => {
+            if (!el || !el.innerText) return false;
+            const elNormalized = normalize(el.innerText);
+            // Check if normalized text includes target (flexible matching)
+            return elNormalized.includes(targetNormalized) || targetNormalized.includes(elNormalized);
+        });
+
+        if (!els.length) return null;
+
+        const rank = el => {
+          const tag = el.tagName.toLowerCase();
+          let score = 0;
+          if (['button','a','input'].includes(tag)) score += 10;
+          if (getComputedStyle(el).cursor === 'pointer') score += 5;
+          if (el.hasAttribute('role')) score += 2;
+          
+          // Prefer exact normalized matches
+          const elNormalized = normalize(el.innerText);
+          if (elNormalized === targetNormalized) score += 20;
+          // Prefer starts with match
+          else if (elNormalized.startsWith(targetNormalized)) score += 15;
+          // Prefer contains match
+          else if (elNormalized.includes(targetNormalized)) score += 10;
+          
+          return score - (el.innerText.length || 0) * 0.01;
+        };
+
+        els.sort((a,b) => rank(b) - rank(a));
+        const el = els[0];
+        const matchedText = (el.innerText || "").trim();
+
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        const rect = el.getBoundingClientRect();
+        const finalRect = withinViewport(rect) ? rect : el.getBoundingClientRect();
+
+        return { 
+            x: finalRect.left + finalRect.width / 2, 
+            y: finalRect.top + finalRect.height / 2,
+            text: matchedText,
+            tag: el.tagName
+        };
+    }
+    """
+
+    for frame in page.frames:
+        try:
+            coords_data = frame.evaluate(fallback_script, target_text)
+        except Exception:
+            continue
+        if not coords_data:
+            continue
+
+        offset_x = 0.0
+        offset_y = 0.0
+        try:
+            owner = frame.frame_element()
+            if owner:
+                box = owner.bounding_box()
+                if box:
+                    offset_x += box.get("x", 0.0)
+                    offset_y += box.get("y", 0.0)
+        except Exception:
+            pass
+
+        try:
+            absolute_x = offset_x + coords_data["x"]
+            absolute_y = offset_y + coords_data["y"]
+            page.mouse.move(absolute_x, absolute_y, steps=2)
+            page.mouse.click(absolute_x, absolute_y)
+            return {
+                "success": True,
+                "method": "fallback_mouse",
+                "matched_text": coords_data.get("text", target_text),
+                "tag": coords_data.get("tag", "unknown")
+            }
+        except Exception:
+            continue
+
+    return {"success": False, "reason": "no elements found"}
+
+
 def main():
     task_description = input("Enter task: ").strip()
     if not task_description:
@@ -192,9 +368,8 @@ def main():
     #     parsed_task=parsed
     # )
 
-    w, h = get_screen_size()
-    w = min(w, 1920)
-    h = min(h, 1080)
+    # Keep a stable viewport to avoid DPI/layout surprises across runs
+    w, h = 1280, 1080
 
     session = SessionManager()
     profile_path = session.get_profile_path(app_name.lower())
@@ -222,11 +397,24 @@ def main():
                 pass
             return
 
-        # IMMEDIATE LOGIN CHECK - Take screenshot right after navigation
+        # WAIT FOR PAGE TO FULLY LOAD BEFORE LOGIN CHECK
         print(f"\n{'='*80}")
-        print(f"🔐 LOGIN CHECK (Immediate):")
+        print(f"⏳ Waiting for page to fully load...")
         print(f"{'='*80}")
-        time.sleep(2)  # Wait for page to fully load
+        
+        # Wait for network idle and DOM content
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        
+        # Additional wait to ensure dynamic content loads
+        time.sleep(3)
+        
+        # NOW TAKE SCREENSHOT AND CHECK LOGIN
+        print(f"\n{'='*80}")
+        print(f"🔐 LOGIN CHECK:")
+        print(f"{'='*80}")
         login_screenshot = task_dir / "login_check_initial.png"
         page.screenshot(path=str(login_screenshot), full_page=True)
         print(f"   📸 Screenshot taken: {login_screenshot.name}")
@@ -234,71 +422,70 @@ def main():
         logged_in_indicators = []
         login_required_indicators = []
         
-        # METHOD 1: Check cookies for session/auth tokens
-        try:
-            cookies = page.context.cookies()
-            cookie_names = [c.get("name", "").lower() for c in cookies]
-            
-            # Common login indicator cookies
-            login_indicators = ["session", "auth", "token", "access_token", "jwt", "sid", "sessionid", "logged_in", "user_id"]
-            has_auth_cookie = any(indicator in " ".join(cookie_names) for indicator in login_indicators)
-            
-            if has_auth_cookie:
-                print(f"   ✅ Found authentication cookies ({len(cookies)} total)")
-                logged_in_indicators.append("Auth cookies found")
-            elif len(cookies) > 0:
-                print(f"   📋 Cookies found: {len(cookies)} cookies")
-            else:
-                print(f"   ⚠️ No cookies found")
-                login_required_indicators.append("No cookies")
-        except Exception as e:
-            print(f"   ⚠️ Cookie check failed: {e}")
-        
-        # METHOD 2: Check URL for login-related paths
+        # METHOD 1: Check URL for login-related paths (MOST RELIABLE)
         try:
             current_url = page.url.lower()
-            login_paths = ["/login", "/signin", "/sign-in", "/auth", "/signup", "/register"]
+            login_paths = ["/login", "/signin", "/sign-in", "/auth", "/signup", "/register", "/welcome"]
             
             if any(path in current_url for path in login_paths):
                 print(f"   ⚠️ URL suggests login page: {current_url[:80]}")
-                login_required_indicators.append(f"URL: {current_url[:80]}")
+                login_required_indicators.append(f"Login URL detected")
             else:
                 print(f"   ✅ URL looks like main app: {current_url[:80]}")
                 logged_in_indicators.append("Main app URL")
         except Exception as e:
             print(f"   ⚠️ URL check failed: {e}")
         
-        # METHOD 3: Simple DOM check for login forms vs user indicators
+        # METHOD 2: Check DOM for login forms vs user indicators
         try:
             login_form_check = page.evaluate("""
             () => {
                 // Check for login form elements
-                const loginInputs = document.querySelectorAll('input[type="password"], input[name*="password"], input[id*="password"]');
-                const loginButtons = Array.from(document.querySelectorAll('button, a, *')).filter(el => {
-                    const text = (el.innerText || '').toLowerCase();
-                    return text.includes('log in') || text.includes('sign in') || text.includes('login');
+                const passwordInputs = document.querySelectorAll('input[type="password"]');
+                const emailInputs = document.querySelectorAll('input[type="email"], input[name*="email"], input[id*="email"]');
+                
+                const loginButtons = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(el => {
+                    const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+                    return text === 'log in' || text === 'sign in' || text === 'login' || text === 'sign up';
                 });
                 
                 // Check for user profile/dashboard indicators
                 const userIndicators = Array.from(document.querySelectorAll('*')).filter(el => {
                     const text = (el.innerText || '').toLowerCase();
                     const attrs = (el.className + ' ' + el.id).toLowerCase();
-                    return text.includes('dashboard') || text.includes('workspace') || 
-                           attrs.includes('user') || attrs.includes('profile') || attrs.includes('avatar');
+                    return text.includes('my workspace') || text.includes('my projects') || 
+                           attrs.includes('avatar') || attrs.includes('user-menu') ||
+                           text.includes('logout') || text.includes('sign out');
                 });
                 
+                const hasLoginForm = passwordInputs.length > 0 && emailInputs.length > 0;
+                
                 return {
-                    hasPasswordField: loginInputs.length > 0,
+                    hasPasswordField: passwordInputs.length > 0,
+                    hasEmailField: emailInputs.length > 0,
+                    hasLoginForm: hasLoginForm,
                     hasLoginButton: loginButtons.length > 0,
-                    hasUserIndicators: userIndicators.length > 0
+                    hasUserIndicators: userIndicators.length > 0,
+                    loginButtonsCount: loginButtons.length,
+                    userIndicatorsCount: userIndicators.length
                 };
             }
             """)
             
-            if login_form_check.get("hasUserIndicators"):
+            print(f"   📋 DOM Analysis:")
+            print(f"      Password fields: {login_form_check.get('hasPasswordField')}")
+            print(f"      Email fields: {login_form_check.get('hasEmailField')}")
+            print(f"      Login buttons: {login_form_check.get('loginButtonsCount', 0)}")
+            print(f"      User indicators: {login_form_check.get('userIndicatorsCount', 0)}")
+            
+            # Clear logic: login button + no user indicators = need to log in
+            if login_form_check.get("hasLoginButton") and not login_form_check.get("hasUserIndicators"):
+                print(f"   ⚠️ DOM shows login button with no user indicators - NOT LOGGED IN")
+                login_required_indicators.append("Login button present, no user indicators")
+            elif login_form_check.get("hasUserIndicators"):
                 print(f"   ✅ DOM shows user indicators (logged in)")
                 logged_in_indicators.append("User indicators in DOM")
-            elif login_form_check.get("hasPasswordField") and login_form_check.get("hasLoginButton"):
+            elif login_form_check.get("hasLoginForm"):
                 print(f"   ⚠️ DOM shows login form present")
                 login_required_indicators.append("Login form in DOM")
             else:
@@ -306,29 +493,54 @@ def main():
         except Exception as e:
             print(f"   ⚠️ DOM check failed: {e}")
         
-        # DECISION LOGIC: If ANY logged_in indicator → assume logged in
-        # Only require login if we have login_required indicators AND no logged_in indicators
+        # METHOD 3: Check cookies (LEAST RELIABLE - some apps work without auth cookies)
+        try:
+            cookies = page.context.cookies()
+            if len(cookies) > 0:
+                print(f"   📋 Cookies found: {len(cookies)} cookies")
+            else:
+                print(f"   ⚠️ No cookies found")
+        except Exception as e:
+            print(f"   ⚠️ Cookie check failed: {e}")
+        
+        # DECISION LOGIC: Require BOTH indicators for logged in, OR use screenshot
         needs_login = False
         login_reason = ""
         
-        if logged_in_indicators:
-            needs_login = False
-            print(f"   ✅ Logged in indicators found: {', '.join(logged_in_indicators)}")
-        elif login_required_indicators:
+        # Strong indicators of login page
+        if login_required_indicators:
             needs_login = True
             login_reason = "; ".join(login_required_indicators)
             print(f"   ⚠️ Login required indicators: {', '.join(login_required_indicators)}")
+        # Strong indicators of being logged in
+        elif logged_in_indicators:
+            needs_login = False
+            print(f"   ✅ Logged in indicators found: {', '.join(logged_in_indicators)}")
         else:
-            # Inconclusive - use screenshot as tiebreaker
-            print(f"   📋 All checks inconclusive - using screenshot as final check...")
+            # Inconclusive - ALWAYS use screenshot as final check
+            print(f"   📋 Checks inconclusive - using screenshot as final check...")
             try:
                 login_prompt = """
-Look at this screenshot. Is this a LOGIN PAGE or SIGNUP PAGE?
+Look at this screenshot carefully. Is this a LOGIN PAGE, SIGNUP PAGE, or WELCOME/ONBOARDING page?
+
+Signs of login page:
+- Password input field
+- Email input field  
+- "Log in" or "Sign in" button
+- "Sign up" or "Create account" option
+- "Forgot password" link
+
+Signs of logged in:
+- User name or profile visible
+- "Logout" or "Sign out" option
+- Dashboard/workspace content
+- Project/task lists
+- Settings or account menu
 
 Answer ONLY with JSON:
 {
   "is_login_page": true/false,
-  "reason": "one sentence"
+  "reason": "one sentence explaining what you see"
 }
 """
                 login_response = detector.analyze_screenshot(login_screenshot, login_prompt)
@@ -341,13 +553,15 @@ Answer ONLY with JSON:
                     needs_login = True
                     login_reason = screenshot_data.get("reason", "Screenshot shows login page")
                 else:
-                    print(f"   ✅ Screenshot suggests logged in (not a login page)")
+                    print(f"   ✅ Screenshot confirms logged in")
                     needs_login = False
             except Exception as e:
                 print(f"   ⚠️ Screenshot check failed: {e}")
-                # Default to logged in if screenshot check fails (avoid false positives)
-                needs_login = False
-                login_reason = "Screenshot check failed, defaulting to logged in"
+                import traceback
+                traceback.print_exc()
+                # When screenshot fails, assume login needed to be safe
+                needs_login = True
+                login_reason = "Screenshot check failed - defaulting to login required"
         
         print(f"   {'='*80}")
         print(f"   FINAL VERDICT: {'⚠️ LOGIN REQUIRED' if needs_login else '✅ LOGGED IN'}")
@@ -441,18 +655,18 @@ Answer ONLY with JSON:
                 })
 
             prompt = f"""
-Goal: {task_description}
+                        Goal: {task_description}
 
-What do I do next?
+                        What do I do next?
 
-{new_dom_elements_text if new_dom_elements_text else "No new popup elements."}
+                        {new_dom_elements_text if new_dom_elements_text else "No new popup elements."}
 
-Return ONLY valid JSON:
-{{
-  "event": "click|fill|done",
-  "text": "exact text to click or label to fill"
-}}
-"""
+                        Return ONLY valid JSON:
+                        {{
+                        "event": "click|fill|done",
+                        "text": "exact text to click or label to fill"
+                        }}
+                    """
             try:
                 raw = detector.analyze_screenshot(screenshot_path, prompt)
                 cleaned = detector._clean_json_like(raw)
@@ -573,10 +787,17 @@ Return ONLY valid JSON:
         goal_reached = False
         dom_snapshot_before = None
         action_history = []  # Track previous actions for context
+        previous_screenshot_path = None  # Track previous screenshot for duplicate detection
+        last_llm_suggestion: Optional[Dict[str, str]] = None
 
         while step_count < max_steps:
             step_count += 1
             print(f"\nStep {step_count}")
+ 
+            try:
+                page.evaluate("() => { window.beforeClickSnapshot = null; window.capturedChanges = []; }")
+            except Exception:
+                pass
 
             # Capture DOM snapshot BEFORE action (if we have a previous snapshot, we'll diff)
             if dom_snapshot_before is None:
@@ -584,7 +805,59 @@ Return ONLY valid JSON:
 
             shot = task_dir / f"screenshot_step_{step_count}.png"
             page.screenshot(path=str(shot), full_page=True)
-
+            
+            # Check goal completion FIRST to inform whether to reuse instruction
+            goal_check = detector.check_goal_completion(shot, task_goal=action_goal, current_state="")
+            goal_completed = goal_check.get("goal_completed", False)
+            goal_reasoning = goal_check.get("reasoning", "")
+            next_steps = goal_check.get("next_steps_needed", [])
+            
+            # If goal is completed, break
+            if goal_completed:
+                print("🎉 Goal achieved!")
+                goal_reached = True
+                break
+            
+            duplicate_screenshot = False
+            if previous_screenshot_path and previous_screenshot_path.exists():
+                try:
+                    import filecmp
+                    if filecmp.cmp(previous_screenshot_path, shot, shallow=False):
+                        duplicate_screenshot = True
+                        print("⚠️ Screenshot is identical to previous step")
+                        
+                        # Don't reuse if goal check suggests a different action
+                        if goal_reasoning and last_llm_suggestion:
+                            # Check if reasoning suggests clicking (not filling)
+                            reasoning_lower = goal_reasoning.lower()
+                            last_action = last_llm_suggestion.get("event", "").lower()
+                            
+                            # If reasoning says "click" but last action was "fill", don't reuse
+                            if ("click" in reasoning_lower or "select" in reasoning_lower) and last_action == "fill":
+                                print(f"   ⚠️ Goal check suggests different action (click), not reusing fill instruction")
+                                reuse_previous_instruction = False
+                            elif last_llm_suggestion:
+                                reused_event = (last_llm_suggestion.get("event") or "").upper()
+                                reused_text = last_llm_suggestion.get("text") or ""
+                                print(f"   ↻ Reusing previous instruction: {reused_event} → '{reused_text}'")
+                                reuse_previous_instruction = True
+                            else:
+                                reuse_previous_instruction = False
+                        elif last_llm_suggestion:
+                            reused_event = (last_llm_suggestion.get("event") or "").upper()
+                            reused_text = last_llm_suggestion.get("text") or ""
+                            print(f"   ↻ Reusing previous instruction: {reused_event} → '{reused_text}'")
+                            reuse_previous_instruction = True
+                        else:
+                            print("   ⚠️ No previous instruction to reuse; requesting a new one.")
+                            reuse_previous_instruction = False
+                except Exception as cmp_err:
+                    print(f"   ⚠️ Screenshot comparison failed: {cmp_err}")
+            
+            previous_screenshot_path = shot
+            if not duplicate_screenshot:
+                reuse_previous_instruction = False
+            
             # LOOP: Keep going until goal is met
             # NO PAGE DESCRIPTION - just ask what to do next
             
@@ -622,369 +895,830 @@ Return ONLY valid JSON:
                 context_str = "\n".join(context_parts)
             
             # Ask LLM what to do next - SIMPLE, NO ANALYSIS
+            # Add context about recent clicks to help avoid loops
+            recent_clicks_context = ""
+            if action_history:
+                recent_clicks = [a for a in action_history[-3:] if a.get("action") == "click"]
+                if recent_clicks:
+                    clicked_texts = [a.get("target") for a in recent_clicks]
+                    recent_clicks_context = f"\n⚠️ Recently clicked: {', '.join(clicked_texts)}"
+                    recent_clicks_context += "\nIf the UI hasn't changed, try a DIFFERENT element or more specific text."
+            
+            # Add goal check context if available
+            goal_context = ""
+            if goal_reasoning and not goal_completed:
+                goal_context = f"\n📋 Goal status: Not completed yet. {goal_reasoning}"
+                if next_steps:
+                    goal_context += f"\nSuggested next steps: {', '.join(next_steps[:2])}"
+            
             prompt = f"""
 Goal: {task_description}
 
-{context_str}
+{context_str}{recent_clicks_context}{goal_context}
 
 What do I do next?
 
-Return ONLY valid JSON:
+IMPORTANT RULES:
+1. If there are multiple similar elements (e.g., multiple "New" buttons), be VERY SPECIFIC.
+2. Use the FULL visible text or unique identifier to avoid clicking the wrong one.
+3. The "text" field should contain ONLY letters (a-z, A-Z) and numbers (0-9). NO special characters, symbols, or punctuation.
+4. Remove all special characters like: +, -, _, @, #, $, %, &, *, (, ), [, ], {{, }}, |, \, /, <, >, =, !, ?, ., ,, ;, :, ', ", etc.
+5. Replace spaces with single spaces and trim whitespace.
+6. Examples:
+   - "Blank + Project" → "Blank Project"
+   - "New-Project" → "New Project"
+   - "Create_Task!" → "Create Task"
+   - "Save & Continue" → "Save Continue"
+
+CRITICAL: Return ONLY the JSON object. Do NOT include any reasoning, explanation, or text before or after the JSON.
+Do NOT write sentences like "The user is currently viewing..." or "They must select..."
+ONLY return the JSON object, nothing else.
+
+Return ONLY this JSON (no other text):
 {{
   "event": "click|fill|done",
-  "text": "exact text to click or label to fill"
+  "text": "clean text with only letters numbers and single spaces"
 }}
 """
-            llm_response = detector.analyze_screenshot(shot, prompt)
+            event = ""
+            text = ""
             
-            # Parse response
-            try:
-                cleaned = detector._clean_json_like(llm_response)
-                llm_suggestion = json.loads(cleaned)
-            except Exception as e:
-                print(f"❌ Failed to parse LLM response: {e}")
-                print(f"Raw response: {llm_response}")
-                continue
-            
-            event = (llm_suggestion.get("event") or "").lower()
-            text = (llm_suggestion.get("text") or "").strip()
-            
-            if not event or not text:
-                print(f"⚠️ Invalid LLM response: {llm_suggestion}")
-                continue
-            
-            if event == "done":
-                print("🤖 LLM reports task complete.")
-                goal_reached = True
-                break
-            
-            print(f"\n{'='*80}")
-            print(f"🎯 LLM SUGGESTION:")
-            print(f"{'='*80}")
-            print(f"   Event: {event.upper()}")
-            print(f"   Text: {text}")
-            print(f"{'='*80}\n")
-            
-            
-            # Use JavaScript to find and click the element
-            if event == "click":
-                print(f"🔍 Searching and clicking element with text: '{text}'")
-                
-                # Check if we should search in capturedChanges (after first click) or full DOM
-                check_captured_script = """
-                () => {
-                    return window.capturedChanges && window.capturedChanges.length > 0;
-                }
-                """
-                has_captured_changes = page.evaluate(check_captured_script)
-                
-                if has_captured_changes:
-                    # Search ONLY in window.capturedChanges (subsequent clicks)
-                    print(f"   📍 Searching in captured changes from previous click...")
-                    click_script = """
-                    (text) => {
-                        // Search in capturedChanges
-                        const target = window.capturedChanges.filter(x => 
-                            x.text && x.text.toLowerCase().includes(text.toLowerCase())
-                        )[0];
-                        
-                        if (target) {
-                            console.log(`Found in capturedChanges: ${target.text?.substring(0, 50)}`);
-                            
-                            // Save DOM state before click
-                            const beforeClick = new Set(document.querySelectorAll('*'));
-                            
-                            // Click at coordinates from capturedChanges
-                            const element = document.elementFromPoint(target.x, target.y);
-                            if (element) {
-                                element.dispatchEvent(new MouseEvent('click', {
-                                    view: window,
-                                    bubbles: true,
-                                    cancelable: true,
-                                    clientX: target.x,
-                                    clientY: target.y
-                                }));
-                                
-                                // Capture new changes after click
-                                return new Promise(resolve => {
-                                    setTimeout(() => {
-                                        const afterClick = new Set(document.querySelectorAll('*'));
-                                        const newElements = [...afterClick].filter(el => !beforeClick.has(el));
-                                        
-                                        window.capturedChanges = newElements.map(el => {
-                                            const rect = el.getBoundingClientRect();
-                                            return {
-                                                tag: el.tagName,
-                                                className: el.className,
-                                                text: el.innerText?.substring(0, 200),
-                                                x: rect.x + rect.width / 2,
-                                                y: rect.y + rect.height / 2
-                                            };
-                                        });
-                                        
-                                        console.log(`Captured ${window.capturedChanges.length} changes`);
-                                        
-                                        resolve({
-                                            found: true,
-                                            clicked: true,
-                                            clickedElement: {
-                                                text: target.text?.substring(0, 100),
-                                                x: target.x,
-                                                y: target.y
-                                            },
-                                            newElements: window.capturedChanges
-                                        });
-                                    }, 500);
-                                });
-                            }
-                        }
-                        
-                        // Not found in capturedChanges - return failure
-                        return { found: false, clicked: false, newElements: [], reason: "not found in capturedChanges" };
-                    }
-                    """
+            if reuse_previous_instruction:
+                event = (last_llm_suggestion.get("event") or "").lower()
+                text = (last_llm_suggestion.get("text") or "").strip()
+                if not event or not text:
+                    print("⚠️ Previous instruction incomplete; requesting fresh guidance.")
+                    reuse_previous_instruction = False
                 else:
-                    # First click: Search entire DOM
-                    print(f"   🌐 First click - searching entire DOM...")
-                    click_script = """
-                    (text) => {
-                        // Save DOM state before click
-                        const beforeClick = new Set(document.querySelectorAll('*'));
-                        
-                        // Find element by text
-                        const el = Array.from(document.querySelectorAll('*'))
-                            .filter(el => el.innerText && el.innerText.toLowerCase().includes(text.toLowerCase()))
-                            .reduce((smallest, current) => 
-                                !smallest || current.innerText.length < smallest.innerText.length ? current : smallest
-                            , null);
-                        
-                        if (el) {
-                            // Get coordinates
-                            const rect = el.getBoundingClientRect();
-                            const x = rect.x + (rect.width / 2);
-                            const y = rect.y + (rect.height / 2);
-                            
-                            console.log(`Clicking at (${x}, ${y})`);
-                            
-                            // Click at coordinates
-                            const target = document.elementFromPoint(x, y);
-                            target.dispatchEvent(new MouseEvent('click', {
-                                view: window,
-                                bubbles: true,
-                                cancelable: true,
-                                clientX: x,
-                                clientY: y
-                            }));
-                            
-                            // Capture changes after click
-                            return new Promise(resolve => {
-                                setTimeout(() => {
-                                    const afterClick = new Set(document.querySelectorAll('*'));
-                                    const newElements = [...afterClick].filter(el => !beforeClick.has(el));
-                                    
-                                    window.capturedChanges = newElements.map(el => {
-                                        const rect = el.getBoundingClientRect();
-                                        return {
-                                            tag: el.tagName,
-                                            className: el.className,
-                                            text: el.innerText?.substring(0, 200),
-                                            x: rect.x + rect.width / 2,
-                                            y: rect.y + rect.height / 2
-                                        };
-                                    });
-                                    
-                                    console.log(`Captured ${window.capturedChanges.length} changes`);
-                                    
-                                    resolve({
-                                        found: true,
-                                        clicked: true,
-                                        clickedElement: {
-                                            text: (el.innerText || "").trim().slice(0, 100),
-                                            tag: el.tagName,
-                                            x: x,
-                                            y: y
-                                        },
-                                        newElements: window.capturedChanges
-                                    });
-                                }, 500);
-                            });
-                        }
-                        
-                        return { found: false, clicked: false, newElements: [] };
-                    }
-                    """
+                    print(f"\n🔁 Action (reused): {event.upper()} → '{text}'")
+            
+            if not reuse_previous_instruction:
+                llm_response = detector.analyze_screenshot(shot, prompt)
                 
+                # Parse response - extract JSON even if LLM added reasoning
                 try:
-                    result = page.evaluate(click_script, text)
-                    
-                    if result.get("found") and result.get("clicked"):
-                        clicked_el = result.get("clickedElement", {})
-                        search_location = "capturedChanges" if has_captured_changes else "full DOM"
-                        print(f"✅ ELEMENT FOUND AND CLICKED (from {search_location}):")
-                        print(f"   Element text: {clicked_el.get('text')}")
-                        print(f"   Clicked at coordinates: ({clicked_el.get('x')}, {clicked_el.get('y')})")
-                        
-                        new_elements = result.get("newElements", [])
-                        result_desc = "success"
-                        if new_elements:
-                            print(f"🆕 Captured {len(new_elements)} new elements to window.capturedChanges")
-                            result_desc = f"success - {len(new_elements)} new elements captured"
-                        
-                        action_history.append({
-                            "step": step_count,
-                            "action": "click",
-                            "target": text,
-                            "result": result_desc
-                        })
-                        
-                        time.sleep(1.0)
-                        dom_snapshot_before = DOMInspector.capture_snapshot(page)
-                    elif result.get("found"):
-                        print(f"❌ ELEMENT FOUND BUT CLICK FAILED")
-                        action_history.append({
-                            "step": step_count,
-                            "action": "click",
-                            "target": text,
-                            "result": "found but click failed"
-                        })
-                    else:
-                        reason = result.get("reason", "")
-                        if has_captured_changes and reason == "not found in capturedChanges":
-                            print(f"❌ ELEMENT NOT FOUND in capturedChanges for text: '{text}'")
-                            print(f"   💡 LLM should look at the new screenshot and try different text")
-                        else:
-                            print(f"❌ ELEMENT NOT FOUND for text: '{text}'")
-                        action_history.append({
-                            "step": step_count,
-                            "action": "click",
-                            "target": text,
-                            "result": "not found"
-                        })
+                    cleaned = detector._clean_json_like(llm_response)
+                    if not cleaned:
+                        print(f"❌ No JSON found in LLM response")
+                        print(f"   Raw response: {llm_response[:200]}...")
+                        continue
+                    llm_suggestion = json.loads(cleaned)
+                except json.JSONDecodeError as e:
+                    print(f"❌ Failed to parse JSON from LLM response: {e}")
+                    print(f"   Extracted text: {cleaned[:200]}...")
+                    print(f"   Raw response preview: {llm_response[:300]}...")
+                    continue
                 except Exception as e:
-                    print(f"❌ Error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"❌ Error processing LLM response: {e}")
+                    continue
+                
+                event = (llm_suggestion.get("event") or "").lower()
+                text = (llm_suggestion.get("text") or "").strip()
+                
+                # Clean text: remove special characters, keep only letters, numbers, and spaces
+                text = re.sub(r'[^a-zA-Z0-9\s]', '', text)  # Remove special chars
+                text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+                text = text.strip()  # Trim
+                
+                if not event or not text:
+                    print(f"⚠️ Invalid LLM response")
+                    # print(f"Details: {llm_suggestion}")  # Commented out
+                    continue
+                
+                last_llm_suggestion = {"event": event, "text": text}
+                print(f"\n🎯 Action: {event.upper()} → '{text}'")
+            
+            # Use Playwright's trusted input to find and click the element
+            if event == "click":
+                print(f"🔍 Attempting trusted click on text: '{text}'")
+                
+                # Check for loop: same action repeated recently
+                recent_same_actions = [a for a in action_history[-5:] if a.get("action") == "click" and a.get("target") == text]
+                if len(recent_same_actions) >= 2:
+                    print(f"⚠️ LOOP DETECTED: Clicked '{text}' {len(recent_same_actions)} times recently")
+                    print(f"   Trying alternative approach or asking LLM for different action...")
+                    # Mark this as a loop and ask LLM for alternative
                     action_history.append({
                         "step": step_count,
                         "action": "click",
                         "target": text,
-                        "result": f"error - {str(e)[:50]}"
+                        "result": "loop_detected - skipping"
                     })
+                    # Clear the last suggestion so LLM gets fresh context
+                    last_llm_suggestion = None
+                    continue
+                
+                click_result = click_text_anywhere(page, text)
+                clicked = click_result.get("success", False)
+
+                if clicked:
+                    matched_text = click_result.get("matched_text", text)
+                    method = click_result.get("method", "unknown")
+                    print(f"✅ Click performed via {method}")
+                    if matched_text != text:
+                        print(f"   Matched: '{matched_text}' (requested: '{text}')")
                     
+                    # Wait for UI to settle
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    except Exception:
+                        pass
+                    try:
+                        page.wait_for_function(
+                            "() => !document.querySelector('[aria-busy=\"true\"], .spinner, .loading')",
+                            timeout=5000
+                        )
+                    except PlaywrightTimeoutError:
+                        pass
+                    except Exception:
+                        pass
+
+                    time.sleep(0.5)
+
+                    # Capture state after click
+                    new_elements: List[Dict] = []
+                    new_snapshot = None
+                    try:
+                        new_snapshot = DOMInspector.capture_snapshot(page)
+                        if dom_snapshot_before is not None and new_snapshot is not None:
+                            new_elements = DOMInspector.diff_snapshots(dom_snapshot_before, new_snapshot)
+                    except Exception:
+                        new_elements = []
+
+                    new_count = len(new_elements)
+                    
+                    # VERIFICATION: Check if click actually changed the UI
+                    if new_count == 0:
+                        print("   ⚠️ WARNING: Click performed but no UI changes detected")
+                        print("   This might indicate wrong element was clicked or click had no effect")
+                        
+                        # Check if we're seeing the same screenshot
+                        if previous_screenshot_path and previous_screenshot_path.exists():
+                            try:
+                                import filecmp
+                                current_check = task_dir / f"click_verification_{step_count}.png"
+                                page.screenshot(path=str(current_check), full_page=True)
+                                if filecmp.cmp(previous_screenshot_path, current_check, shallow=False):
+                                    print("   ❌ CONFIRMED: Screenshot identical - click had no effect")
+                                    action_history.append({
+                                        "step": step_count,
+                                        "action": "click",
+                                        "target": text,
+                                        "result": "failed - no UI change detected"
+                                    })
+                                    # Try to get LLM to suggest a different element
+                                    last_llm_suggestion = None
+                                    continue
+                            except Exception:
+                                pass
+                    else:
+                        if new_snapshot is not None:
+                            dom_snapshot_before = new_snapshot
+                        print(f"   🆕 Detected {new_count} new/changed elements - click verified")
+                        summary_lines = DOMInspector.format_new_elements_for_llm(new_elements).splitlines()
+                        for line in summary_lines[:5]:  # Limit output
+                            print(f"      {line}")
+
+                    action_history.append({
+                        "step": step_count,
+                        "action": "click",
+                        "target": text,
+                        "matched": matched_text,
+                        "result": f"success - {new_count} new elements"
+                    })
+                else:
+                    reason = click_result.get("reason", "unknown")
+                    print(f"⚠️ Could not click: {reason}")
+                    action_history.append({
+                        "step": step_count,
+                        "action": "click",
+                        "target": text,
+                        "result": f"failed - {reason}"
+                    })
+
+                try:
+                    page.evaluate("() => { window.beforeClickSnapshot = null; window.capturedChanges = []; }")
+                except Exception:
+                    pass
+
             elif event == "fill":
-                print(f"🔍 Searching for input field with label: '{text}'")
-                find_script = """
-                (labelText) => {
-                    const target = (labelText || "").trim().toLowerCase();
-                    const labelElements = Array.from(document.querySelectorAll('*'))
-                        .filter(el => el.innerText && el.innerText.toLowerCase().includes(target));
+                print(f"🔍 Filling input field with label: '{text}'")
+                
+                # Always use "Test" as the default value for all fill actions
+                value = "Test"
+                
+                # Allow override from task parameters if explicitly provided
+                if "name" in text.lower() or "title" in text.lower():
+                    value = task_parameters.get("name") or task_parameters.get("title") or "Test"
+                elif "description" in text.lower():
+                    value = task_parameters.get("description") or "Test"
+                
+                print(f"   Value to enter: '{value}'")
+                
+                # Smart fill logic that handles inputs, textareas, and contenteditable divs/spans
+                fill_script = """
+                (args) => {
+                    const [labelText, valueToEnter] = args;
                     
-                    const labelEl = labelElements.reduce((smallest, current) =>
-                        !smallest || current.innerText.length < smallest.innerText.length ? current : smallest
-                    , null);
+                    // Normalize text for matching
+                    const normalize = (str) => {
+                        if (!str) return '';
+                        return str.replace(/[^a-zA-Z0-9\\s]/g, '')
+                                 .replace(/\\s+/g, ' ')
+                                 .trim()
+                                 .toLowerCase();
+                    };
                     
-                    let inputEl = null;
-                    if (labelEl) {
-                        const labelFor = labelEl.getAttribute('for');
-                        if (labelFor) inputEl = document.getElementById(labelFor);
-                        if (!inputEl) inputEl = labelEl.querySelector('input, textarea, [contenteditable="true"]');
-                        if (!inputEl) {
-                            const nextSibling = labelEl.nextElementSibling;
-                            if (nextSibling && (nextSibling.tagName === 'INPUT' || nextSibling.tagName === 'TEXTAREA')) {
-                                inputEl = nextSibling;
+                    const targetNormalized = normalize(labelText);
+                    console.log(`[FILL] Searching for label: "${labelText}" (normalized: "${targetNormalized}")`);
+                    
+                    // Helper to get labels for any element
+                    const getLabelsForElement = (el) => {
+                        const labels = [];
+                        
+                        // Standard input labels
+                        if (el.labels && el.labels.length > 0) {
+                            labels.push(...Array.from(el.labels).map(l => l.textContent.trim()));
+                        }
+                        
+                        // Closest label
+                        const closestLabel = el.closest('label');
+                        if (closestLabel) {
+                            labels.push(closestLabel.textContent.trim());
+                        }
+                        
+                        // Label[for] attribute
+                        if (el.id) {
+                            const forLabel = document.querySelector(`label[for="${el.id}"]`);
+                            if (forLabel) {
+                                labels.push(forLabel.textContent.trim());
                             }
                         }
-                    }
-                    
-                    if (!inputEl) {
-                        const allInputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
-                            .filter(el => {
-                                const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
-                                const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-                                return placeholder.includes(target) || ariaLabel.includes(target);
-                            });
-                        if (allInputs.length > 0) {
-                            inputEl = allInputs[0];
+                        
+                        // Placeholder
+                        if (el.placeholder) {
+                            labels.push(el.placeholder.trim());
                         }
-                    }
+                        
+                        // Aria-label
+                        if (el.getAttribute('aria-label')) {
+                            labels.push(el.getAttribute('aria-label').trim());
+                        }
+                        
+                        // For contenteditable: check parent labels, nearby text
+                        if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                            // Check parent for label-like text
+                            const parent = el.parentElement;
+                            if (parent) {
+                                // Look for label element nearby
+                                const nearbyLabel = parent.querySelector('label') || 
+                                                   parent.previousElementSibling?.querySelector('label') ||
+                                                   parent.closest('[class*="label"], [class*="Label"]');
+                                if (nearbyLabel) {
+                                    labels.push(nearbyLabel.textContent.trim());
+                                }
+                                
+                                // Check for text before the element
+                                const prevText = parent.textContent.split(el.textContent)[0].trim();
+                                if (prevText && prevText.length < 50) {
+                                    labels.push(prevText);
+                                }
+                            }
+                            
+                            // Check aria-label on parent
+                            if (parent && parent.getAttribute('aria-label')) {
+                                labels.push(parent.getAttribute('aria-label').trim());
+                            }
+                        }
+                        
+                        return labels.filter(l => l && l.length > 0);
+                    };
                     
-                    if (inputEl) {
-                        const rect = inputEl.getBoundingClientRect();
+                    // Helper to check if element is fillable
+                    const isFillable = (el) => {
+                        if (el.tagName === 'INPUT' && el.type !== 'hidden' && el.type !== 'submit' && el.type !== 'button') {
+                            return true;
+                        }
+                        if (el.tagName === 'TEXTAREA') {
+                            return true;
+                        }
+                        if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                            return true;
+                        }
+                        if (el.getAttribute('role') === 'textbox' || el.getAttribute('role') === 'combobox') {
+                            return true;
+                        }
+                        // Check if it's a div/span that acts like an input (common in modern frameworks)
+                        if ((el.tagName === 'DIV' || el.tagName === 'SPAN') && 
+                            (el.classList.toString().toLowerCase().includes('input') || 
+                             el.classList.toString().toLowerCase().includes('field') ||
+                             el.getAttribute('data-testid')?.includes('input'))) {
+                            return true;
+                        }
+                        return false;
+                    };
+                    
+                    // Find all fillable elements
+                    const allElements = document.querySelectorAll('input, textarea, [contenteditable="true"], [contenteditable], [role="textbox"], [role="combobox"], div, span');
+                    let targetElement = null;
+                    let matchedLabelsArray = null;
+                    let allLabelsDebug = [];
+                    
+                    allElements.forEach((el, idx) => {
+                        if (!isFillable(el)) return;
+                        if (el.offsetParent === null && !el.hasAttribute('contenteditable')) return; // Skip hidden (except contenteditable)
+                        
+                        const labelsArray = getLabelsForElement(el);
+                        
+                        // Debug: collect all labels
+                        if (labelsArray.length > 0) {
+                            allLabelsDebug.push({
+                                index: idx,
+                                labels: [...labelsArray],
+                                tag: el.tagName,
+                                type: el.type || (el.contentEditable ? 'contenteditable' : 'unknown'),
+                                visible: el.offsetParent !== null,
+                                id: el.id || '',
+                                name: el.name || '',
+                                contentEditable: el.contentEditable === 'true',
+                                role: el.getAttribute('role') || ''
+                            });
+                        }
+                        
+                        // Check if any label matches
+                        const matches = labelsArray.some(label => {
+                            const labelNormalized = normalize(label);
+                            const exactMatch = labelNormalized === targetNormalized;
+                            const includesMatch = labelNormalized.includes(targetNormalized) || targetNormalized.includes(labelNormalized);
+                            if (exactMatch || includesMatch) {
+                                console.log(`[FILL] Match found: "${label}" (normalized: "${labelNormalized}") matches "${targetNormalized}"`);
+                            }
+                            return exactMatch || includesMatch;
+                        });
+                        
+                        if (matches) {
+                            targetElement = el;
+                            matchedLabelsArray = labelsArray;
+                        }
+                    });
+                    
+                    if (targetElement) {
+                        targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        targetElement.focus();
+                        
+                        // Helper to trigger comprehensive events
+                        const triggerAllEvents = (el, value) => {
+                            // Clear first
+                            if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                                el.textContent = '';
+                            } else if ('value' in el) {
+                                el.value = '';
+                            } else {
+                                el.textContent = '';
+                            }
+                            
+                            // Set value
+                            if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                                el.textContent = value;
+                            } else if ('value' in el) {
+                                el.value = value;
+                            } else {
+                                el.textContent = value;
+                            }
+                            
+                            // Trigger comprehensive events
+                            const events = [
+                                new Event('input', { bubbles: true, cancelable: true }),
+                                new Event('change', { bubbles: true, cancelable: true }),
+                                new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' }),
+                                new KeyboardEvent('keypress', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' }),
+                                new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: value.slice(-1) || 'Enter' })
+                            ];
+                            
+                            events.forEach(evt => {
+                                try {
+                                    el.dispatchEvent(evt);
+                                } catch (e) {
+                                    console.warn(`[FILL] Failed to dispatch ${evt.type}:`, e);
+                                }
+                            });
+                            
+                            // Also trigger focus/blur to simulate real interaction
+                            el.dispatchEvent(new Event('focus', { bubbles: true }));
+                            el.dispatchEvent(new Event('blur', { bubbles: true }));
+                            el.focus(); // Re-focus after blur
+                        };
+                        
+                        // Handle different element types
+                        if (targetElement.contentEditable === 'true' || targetElement.getAttribute('contenteditable') === 'true') {
+                            // Contenteditable: use comprehensive event triggering
+                            triggerAllEvents(targetElement, valueToEnter);
+                            console.log(`[FILL] Set contenteditable value: "${valueToEnter}"`);
+                        } else if (targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') {
+                            // Standard input: set value and trigger all events
+                            triggerAllEvents(targetElement, valueToEnter);
+                            console.log(`[FILL] Set input value: "${valueToEnter}"`);
+                        } else {
+                            // Div/span acting as input: use comprehensive events
+                            triggerAllEvents(targetElement, valueToEnter);
+                            console.log(`[FILL] Set custom input value: "${valueToEnter}"`);
+                        }
+                        
+                        const matchedLabel = matchedLabelsArray.find(l => {
+                            const lNorm = normalize(l);
+                            return lNorm === targetNormalized || lNorm.includes(targetNormalized) || targetNormalized.includes(lNorm);
+                        }) || matchedLabelsArray[0];
+                        
                         return {
-                            found: true,
-                            tag: inputEl.tagName,
-                            x: rect.x + rect.width / 2,
-                            y: rect.y + rect.height / 2
+                            success: true,
+                            tag: targetElement.tagName,
+                            value: valueToEnter,
+                            inputType: targetElement.type || (targetElement.contentEditable ? 'contenteditable' : 'custom'),
+                            matchedLabel: matchedLabel,
+                            method: targetElement.contentEditable ? 'contenteditable' : (targetElement.tagName === 'INPUT' ? 'input' : 'custom')
+                        };
+                    } else {
+                        console.error(`[FILL] No fillable element found with label text "${labelText}"`);
+                        const availableLabels = [];
+                        allLabelsDebug.forEach(item => {
+                            item.labels.forEach(label => {
+                                availableLabels.push(`${label} (${item.tag}, ${item.type}, visible: ${item.visible})`);
+                            });
+                        });
+                        return { 
+                            success: false, 
+                            reason: "fillable element not found",
+                            searchedFor: labelText,
+                            normalizedSearch: targetNormalized,
+                            availableLabels: [...new Set(availableLabels)].slice(0, 15),
+                            totalElementsFound: allElements.length,
+                            fillableElementsFound: allLabelsDebug.length,
+                            debugInfo: allLabelsDebug.slice(0, 5)
                         };
                     }
-                    return { found: false };
                 }
                 """
+                
                 try:
-                    result = page.evaluate(find_script, text)
-                    if result.get("found"):
-                        print(f"✅ INPUT FIELD FOUND:")
-                        print(f"   Tag: {result.get('tag')}")
-                        print(f"   Position: ({result.get('x')}, {result.get('y')})")
-                        
-                        value = task_parameters.get("name") or task_parameters.get("title") or "Test"
-                        if "description" in text.lower():
-                            value = task_parameters.get("description") or "Automated description"
-                        fill_result = controller.fill_smart(text, value)
-                        if fill_result.get("success"):
-                            print(f"✅ Filled '{text}' with '{value}' successfully")
-                            
-                            action_history.append({
-                                "step": step_count,
-                                "action": "fill",
-                                "target": text,
-                                "value": value,
-                                "result": "success"
-                            })
-                            
-                            time.sleep(1.5)
+                    result = page.evaluate(fill_script, [text, value])
+                    
+                    if result.get("success"):
+                        matched_label = result.get("matchedLabel", text)
+                        input_type = result.get("inputType", "text")
+                        print(f"✅ Filled '{matched_label}' with '{value}' successfully")
+                        print(f"   Input type: {input_type}, Tag: {result.get('tag')}")
+
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except PlaywrightTimeoutError:
+                            pass
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_function(
+                                "() => !document.querySelector('[aria-busy=\"true\"], .spinner, .loading')",
+                                timeout=5000
+                            )
+                        except PlaywrightTimeoutError:
+                            pass
+                        except Exception:
+                            pass
+
+                        time.sleep(0.5)
+
+                        new_elements: List[Dict] = []
+                        new_snapshot = None
+                        try:
+                            new_snapshot = DOMInspector.capture_snapshot(page)
+                            if dom_snapshot_before is not None and new_snapshot is not None:
+                                new_elements = DOMInspector.diff_snapshots(dom_snapshot_before, new_snapshot)
+                        except Exception:
+                            new_elements = []
+
+                        if new_snapshot is not None:
+                            dom_snapshot_before = new_snapshot
+
+                        new_count = len(new_elements)
+                        if new_count:
+                            print(f"   🆕 Detected {new_count} new/changed elements after fill")
+                            summary_lines = DOMInspector.format_new_elements_for_llm(new_elements).splitlines()
+                            for line in summary_lines:
+                                print(f"      {line}")
                         else:
-                            print(f"❌ Fill failed: {fill_result.get('error')}")
-                            action_history.append({
-                                "step": step_count,
-                                "action": "fill",
-                                "target": text,
-                                "result": f"failed - {fill_result.get('error')}"
-                            })
-                    else:
-                        print(f"❌ INPUT FIELD NOT FOUND for label: '{text}'")
+                            print("   ℹ️ No obvious new interactive elements detected after fill.")
+                        
                         action_history.append({
                             "step": step_count,
                             "action": "fill",
                             "target": text,
-                            "result": "not found"
+                            "value": value,
+                            "result": f"success - {new_count} new elements"
+                        })
+                    else:
+                        reason = result.get("reason", "unknown")
+                        searched_for = result.get("searchedFor", text)
+                        normalized_search = result.get("normalizedSearch", "")
+                        total_inputs = result.get("totalInputsFound", 0)
+                        available_labels = result.get("availableLabels", [])
+                        
+                        print(f"❌ Fill failed: {reason}")
+                        print(f"   Searched for: '{searched_for}' (normalized: '{normalized_search}')")
+                        print(f"   Total inputs/textareas found: {total_inputs}")
+                        if available_labels:
+                            print(f"   Available labels on page:")
+                            for label in available_labels[:10]:
+                                print(f"      - {label}")
+                        else:
+                            print(f"   ⚠️ No labels found on any inputs/textareas")
+                        
+                        action_history.append({
+                            "step": step_count,
+                            "action": "fill",
+                            "target": text,
+                            "value": value,
+                            "result": f"failed - {reason}"
                         })
                 except Exception as e:
-                    print(f"❌ Error finding input field: {e}")
+                    print(f"❌ Error filling input: {e}")
+                    import traceback
+                    traceback.print_exc()
                     action_history.append({
                         "step": step_count,
                         "action": "fill",
                         "target": text,
                         "result": f"error - {str(e)[:50]}"
                     })
-            
-            # Check if goal is reached
-            time.sleep(1.0)
-            post_shot = capture_state(f"{step_count}_after_action")
-            goal_check = detector.check_goal_completion(post_shot, task_goal=action_goal, current_state="")
-            if goal_check.get("goal_completed"):
-                print("🎉 Goal achieved!")
-                goal_reached = True
-                break
+
+                try:
+                    page.evaluate("() => { window.beforeClickSnapshot = null; window.capturedChanges = []; }")
+                except Exception:
+                    pass
             
             # Update DOM snapshot for next iteration
             dom_snapshot_before = DOMInspector.capture_snapshot(page)
             time.sleep(0.5)
+            
+            # Note: Goal check is now done at the START of each loop iteration
+            # to inform whether to reuse instructions
 
 
         else:
             print("Reached maximum step limit, stopping.")
 
+        # Generate HTML documentation
+        print("\n" + "="*80)
+        print("📄 Generating documentation...")
+        print("="*80)
+        
+        try:
+            # Collect all screenshots
+            screenshots = sorted(task_dir.glob("screenshot_step_*.png"))
+            
+            # Generate clean HTML
+            html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>How to: {task_description}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 40px 20px;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }}
+        .header h1 {{
+            font-size: 32px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }}
+        .header p {{
+            font-size: 16px;
+            opacity: 0.9;
+        }}
+        .content {{
+            padding: 40px;
+        }}
+        .step {{
+            margin-bottom: 50px;
+            padding-bottom: 30px;
+            border-bottom: 1px solid #e0e0e0;
+        }}
+        .step:last-child {{
+            border-bottom: none;
+        }}
+        .step-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }}
+        .step-number {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 18px;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }}
+        .step-title {{
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }}
+        .step-action {{
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-left: 10px;
+        }}
+        .action-click {{
+            background: #e3f2fd;
+            color: #1976d2;
+        }}
+        .action-fill {{
+            background: #f3e5f5;
+            color: #7b1fa2;
+        }}
+        .step-description {{
+            margin-bottom: 20px;
+            font-size: 16px;
+            color: #666;
+            padding-left: 55px;
+        }}
+        .screenshot {{
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }}
+        .footer {{
+            background: #f9f9f9;
+            padding: 30px 40px;
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+        }}
+        .summary {{
+            background: #f0f7ff;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+        }}
+        .summary h3 {{
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }}
+        .summary-item {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }}
+        .summary-item:last-child {{
+            border-bottom: none;
+        }}
+        .summary-label {{
+            font-weight: 500;
+            color: #555;
+        }}
+        .summary-value {{
+            color: #667eea;
+            font-weight: 600;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{task_description.title()}</h1>
+            <p>Step-by-step guide with screenshots</p>
+        </div>
+        
+        <div class="content">
+            <div class="summary">
+                <h3>Summary</h3>
+                <div class="summary-item">
+                    <span class="summary-label">Task</span>
+                    <span class="summary-value">{task_description}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Application</span>
+                    <span class="summary-value">{app_name}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Total Steps</span>
+                    <span class="summary-value">{len(action_history)}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Status</span>
+                    <span class="summary-value">{"✅ Completed" if goal_reached else "⚠️ Incomplete"}</span>
+                </div>
+            </div>
+"""
+            
+            # Add each step with screenshot
+            for idx, action in enumerate(action_history, 1):
+                action_type = action.get("action", "unknown")
+                target = action.get("target", "")
+                value = action.get("value", "")
+                result = action.get("result", "")
+                
+                # Generate natural language instruction
+                if action_type == "click":
+                    instruction = f"Click on '{target}'"
+                elif action_type == "fill":
+                    instruction = f"Enter '{value}' in the '{target}' field"
+                else:
+                    instruction = f"Perform {action_type} on '{target}'"
+                
+                # Find corresponding screenshot
+                screenshot_name = f"screenshot_step_{idx}.png"
+                screenshot_path = task_dir / screenshot_name
+                
+                action_class = "action-click" if action_type == "click" else "action-fill"
+                action_label = action_type.upper()
+                
+                html_content += f"""
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-number">{idx}</div>
+                    <div class="step-title">
+                        {instruction}
+                        <span class="step-action {action_class}">{action_label}</span>
+                    </div>
+                </div>
+                <div class="step-description">
+                    {instruction}. Result: {result}
+                </div>
+"""
+                
+                if screenshot_path.exists():
+                    html_content += f"""
+                <img src="{screenshot_name}" alt="Step {idx}" class="screenshot" />
+"""
+                
+                html_content += """
+            </div>
+"""
+            
+            html_content += """
+        </div>
+        
+        <div class="footer">
+            <p>Generated automatically by AI Agent • {app_name}</p>
+            <p style="margin-top: 10px; color: #999;">This documentation was created by analyzing the application interface and user interactions.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+            
+            # Write HTML file
+            html_path = task_dir / "documentation.html"
+            html_path.write_text(html_content, encoding="utf-8")
+            
+            print(f"✅ Documentation generated: {html_path}")
+            print(f"   Open in browser: file://{html_path.absolute()}")
+            
+        except Exception as e:
+            print(f"⚠️ Failed to generate documentation: {e}")
+            import traceback
+            traceback.print_exc()
 
         print("\nKeeping browser open for 30 seconds to review...")
         time.sleep(30)

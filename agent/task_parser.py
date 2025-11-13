@@ -4,7 +4,7 @@ Uses Gemini API to parse tasks like "How do I create a task in Asana?" or "How d
 """
 import os
 import json
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from config.prompts import TaskParsingPrompts
 
@@ -23,10 +23,8 @@ class TaskParser:
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables")
         
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.client = genai.Client(api_key=api_key)
     
     def parse(self, task_description: str) -> dict:
         """
@@ -45,7 +43,10 @@ class TaskParser:
         prompt = TaskParsingPrompts.parse_task(task_description)
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[prompt]
+            )
             response_text = response.text.strip()
             
             # Clean up response (remove markdown code blocks if present)

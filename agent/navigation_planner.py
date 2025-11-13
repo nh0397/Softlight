@@ -4,7 +4,7 @@ Uses LLM to determine what action to take next
 """
 import os
 import json
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from config.prompts import NavigationPrompts
 
@@ -19,10 +19,8 @@ class NavigationPlanner:
         if not api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables")
         
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.client = genai.Client(api_key=api_key)
     
     def get_next_action(
         self,
@@ -106,7 +104,10 @@ Return the next action as JSON:
 """
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[prompt]
+            )
             response_text = response.text.strip()
             
             # Clean up response (remove markdown code blocks if present)
