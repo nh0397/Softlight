@@ -68,15 +68,34 @@ Return JSON exactly as:
     @staticmethod
     def goal_check(task_goal: str, current_state: str = ""):
         return f"""
-Has this goal been completed: "{task_goal}"?
+Has this goal been FULLY completed: "{task_goal}"?
+
+CRITICAL: The goal is ONLY completed when:
+- The item (task/project/database/etc.) is ACTUALLY CREATED and VISIBLE in a list or dashboard
+- A confirmation message appears (e.g., "Task created", "Project created successfully")
+- The item appears in the main view (not just a form/modal to create it)
+- The workflow is COMPLETE, not just started
+
+The goal is NOT completed if:
+- A form/modal appears to create the item (this is just the START, not completion)
+- You see input fields to fill (this means creation hasn't happened yet)
+- You're in the middle of a workflow (e.g., clicked "Create" but haven't filled the form)
+- The word appears in the UI but it's just a label or button text
+
 {f"Current state: {current_state}" if current_state else ""}
+
+Look for CONCRETE EVIDENCE of completion:
+- Item visible in a list/board/dashboard
+- Success/confirmation message
+- Item details page showing the created item
+- No more forms or modals asking for input
 
 Return JSON exactly as:
 {{
   "goal_completed": true/false,
-  "completion_indicators": [],
-  "next_steps_needed": [],
-  "reasoning": "short"
+  "completion_indicators": ["list of specific evidence"],
+  "next_steps_needed": ["what still needs to be done"],
+  "reasoning": "detailed explanation of why completed or not"
 }}
 """
 
