@@ -8,12 +8,8 @@ venv/
 env/
 .venv
 *.log
-captures/
 sessions/
 browser_profiles/
-*.png
-*.html
-*.json
 .DS_Store
 test_*.py
 

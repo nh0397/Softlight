@@ -877,7 +877,7 @@ Answer ONLY with JSON:
             # LOOP: Keep going until goal is met
             # NO PAGE DESCRIPTION - just ask what to do next
             
-            # Build context from previous actions
+            # Build context from previous actions - be more descriptive
             context_parts = []
             if action_history:
                 context_parts.append("What I did in previous steps:")
@@ -890,8 +890,23 @@ Answer ONLY with JSON:
                     
                     if action_type == "fill" and value:
                         context_parts.append(f"  Step {step_num}: Filled '{target}' with '{value}' → {result}")
-                    else:
+                    elif action_type == "click":
                         context_parts.append(f"  Step {step_num}: Clicked '{target}' → {result}")
+                    else:
+                        context_parts.append(f"  Step {step_num}: {action_type.upper()} '{target}' → {result}")
+                
+                # Add summary of workflow state
+                recent_actions_summary = []
+                for action in action_history[-5:]:
+                    action_type = action.get("action", "")
+                    if action_type == "click":
+                        recent_actions_summary.append(f"clicked {action.get('target', '')}")
+                    elif action_type == "fill":
+                        recent_actions_summary.append(f"filled {action.get('target', '')}")
+                
+                if recent_actions_summary:
+                    context_parts.append(f"\nRecent workflow: {' → '.join(recent_actions_summary)}")
+                    context_parts.append("IMPORTANT: If you see a form/modal, you need to FILL it and SUBMIT it. The goal is not complete until the item is actually created and visible.")
             else:
                 context_parts.append("Starting fresh.")
             
@@ -934,11 +949,15 @@ Goal: {task_description}
 
 What do I do next?
 
+REMEMBER: The goal is ONLY complete when the item is ACTUALLY CREATED and visible (e.g., task appears in list, project shows in dashboard).
+If you see a form/modal, you must FILL required fields and SUBMIT/CREATE to complete the goal.
+Just seeing the word "{action_goal.split('_')[0]}" in the UI doesn't mean it's created - you need to see the actual item in a list or confirmation message.
+
 IMPORTANT RULES:
 1. If there are multiple similar elements (e.g., multiple "New" buttons), be VERY SPECIFIC.
 2. Use the FULL visible text or unique identifier to avoid clicking the wrong one.
 3. The "text" field should contain ONLY letters (a-z, A-Z) and numbers (0-9). NO special characters, symbols, or punctuation.
-4. Remove all special characters like: +, -, _, @, #, $, %, &, *, (, ), [, ], {{, }}, |, \, /, <, >, =, !, ?, ., ,, ;, :, ', ", etc.
+4. Remove all special characters like: +, -, _, @, #, $, %, &, *, (, ), [, ], {{, }}, |, \\, /, <, >, =, !, ?, ., ,, ;, :, ', ", etc.
 5. Replace spaces with single spaces and trim whitespace.
 6. Examples:
    - "Blank + Project" → "Blank Project"
