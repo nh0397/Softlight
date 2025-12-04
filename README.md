@@ -1,26 +1,37 @@
-# AI Web Automation Agent
+# WorkflowDoc - Automated Process Documentation Tool
 
-An intelligent AI agent that automatically navigates web applications, performs tasks, and captures every UI state in the workflow. Think of it as a smart browser assistant that can see, understand, and interact with web pages just like a human would.
+A developer tool that automatically captures and documents web application workflows. Stop writing manual documentation—let this tool create comprehensive, step-by-step guides with screenshots for your team.
 
-## What This Does
+> **Note**: This is currently a proof of concept (POC). The core functionality is working and demonstrates the potential of automated workflow documentation. With further development, this could become a powerful tool for teams to maintain up-to-date documentation, reduce onboarding friction, and build comprehensive knowledge bases.
 
-You give it a task in plain English like:
+## The Problem It Solves
+
+Every engineering team faces the same challenge: **onboarding new engineers is painful**. You spend hours writing documentation that becomes outdated the moment the UI changes. New team members struggle to understand complex workflows, and you're constantly answering the same questions.
+
+**WorkflowDoc solves this by:**
+- Automatically capturing every step of a workflow with screenshots
+- Generating beautiful, up-to-date documentation that never goes stale
+- Creating a knowledge base that new engineers can reference independently
+- Serving as a foundation for documenting any process in your stack
+
+## What It Does
+
+Give it a workflow to document in plain English:
 - "Create a new task in Asana"
-- "Create a new project in Linear"
-- "Create a new database in Notion"
+- "Set up a new project in Linear"
+- "Configure a database filter in Notion"
 
-The agent then:
-1. **Understands** what you want to do
-2. **Logs in** (or asks you to log in if needed)
-3. **Navigates** the application step by step
-4. **Takes screenshots** at each important moment
-5. **Creates documentation** showing exactly how to do the task
+The tool then:
+1. **Executes** the workflow automatically
+2. **Captures** screenshots at each critical step
+3. **Documents** the entire process with visual guides
+4. **Generates** HTML documentation ready to share with your team
 
-It's like having a robot that watches you do something once, then can teach others how to do it by showing them every step with pictures.
+New engineers can now follow these guides independently, reducing onboarding time and freeing up your team's time.
 
-## How It Works (The Big Picture)
+## How It Works
 
-Imagine you're teaching someone how to use a website, but instead of explaining, you're taking a photo at each step and showing them what changed.
+The tool uses AI vision to understand web interfaces and automatically navigate through workflows, capturing the entire process as it goes.
 
 ### The Core Concept: **See → Understand → Act → Verify**
 
@@ -277,10 +288,12 @@ cp env.example .env
 # Edit .env and add your GEMINI_API_KEY
 ```
 
-4. **Run the agent**:
+4. **Document a workflow**:
 ```bash
 python main.py "Create a new task in Asana"
 ```
+
+The tool will execute the workflow and generate documentation in `captures/[workflow_name]/documentation.html`
 
 ## Requirements
 
@@ -300,7 +313,7 @@ python main.py "Create a new task in Asana"
 ## Project Structure
 
 ```
-ai-web-automation/
+workflowdoc/
 ├── agent/                    # Core agent components
 │   ├── task_parser.py       # Parses natural language → structured data
 │   ├── state_detector.py     # AI vision analysis of screenshots
@@ -324,6 +337,13 @@ ai-web-automation/
 ```
 
 ## For Developers
+
+### Use Cases
+
+- **Onboarding Documentation**: Create guides for new engineers to follow independently
+- **Process Documentation**: Document any workflow in your stack (deployments, configurations, setups)
+- **Knowledge Base**: Build a library of documented processes that your team can reference
+- **Training Materials**: Generate visual guides for complex multi-step processes
 
 ### Adding a New App
 

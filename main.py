@@ -347,7 +347,7 @@ def main():
 
     parser = TaskParser()
     parsed = parser.parse(task_description)
-    app_name = "AI Web Automation Agent"
+    app_name = "WorkflowDoc"
     app_url = parsed["app_url"]
     action_goal = parsed["action"]
     task_name_slug = parsed["task_name"]
