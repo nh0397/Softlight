@@ -1,4 +1,4 @@
-# Softlight Assignment - AI Web Automation Agent
+# AI Web Automation Agent
 
 An intelligent AI agent that automatically navigates web applications, performs tasks, and captures every UI state in the workflow. Think of it as a smart browser assistant that can see, understand, and interact with web pages just like a human would.
 
@@ -300,7 +300,7 @@ python main.py "Create a new task in Asana"
 ## Project Structure
 
 ```
-Softlight/
+ai-web-automation/
 ├── agent/                    # Core agent components
 │   ├── task_parser.py       # Parses natural language → structured data
 │   ├── state_detector.py     # AI vision analysis of screenshots
@@ -354,4 +354,4 @@ Built with:
 
 ---
 
-**Made with ❤️ for the Softlight Assignment**
+**Made with ❤️**

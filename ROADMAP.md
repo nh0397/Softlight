@@ -1,4 +1,4 @@
-# Softlight Assignment - Development Roadmap
+# Development Roadmap
 
 This is a straightforward plan to build the UI state capture system.
 

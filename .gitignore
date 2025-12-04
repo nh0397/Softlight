@@ -12,4 +12,5 @@ sessions/
 browser_profiles/
 .DS_Store
 test_*.py
+email_to_ceo.md
 
